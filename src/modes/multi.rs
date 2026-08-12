@@ -82,36 +82,38 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
 
     let poll_interval = std::time::Duration::from_secs(cfg.gitlab.poll_interval_secs);
     let mut poll_count: u64 = 0;
+    let mut first_poll = true;  // Independent flag: always baseline on first poll, regardless of DB
 
     loop {
         for project in &projects {
-            let (encoded_path, short_name, last_id) = {
+            let (encoded_path, short_name) = {
                 let s = match state.get(project) {
                     Some(s) => s,
                     None => continue,
                 };
-                (s.encoded_path.clone(), s.short_name.clone(), s.last_event_id)
+                (s.encoded_path.clone(), s.short_name.clone())
             };
 
             match client.get_project_events_unfiltered(&encoded_path).await {
                 Ok(events) => {
                     let new_last_id = events.first().map(|e| e.id);
 
-                    // Traverse ALL events (not just first) to avoid missing push/release
-                    // But on first poll (last_id=None), only process the latest to avoid storm
+                    // === FIRST POLL: only establish baseline, NEVER process events ===
+                    if first_poll {
+                        if let Some(id) = new_last_id {
+                            info!("{} initial event ID: {}", short_name, id);
+                            state.get_mut(project).unwrap().last_event_id = Some(id);
+                        }
+                        continue;
+                    }
+
+                    // === SUBSEQUENT POLLS: process new events ===
                     for latest in &events {
                         let event_id = latest.id;
-
-                        // Skip already-processed events
-                        if let Some(last) = last_id {
-                            if event_id <= last {
-                                break;
-                            }
-                        } else {
-                            // First poll: only process the very first (latest) event
-                            if event_id != events.first().unwrap().id {
-                                continue;
-                            }
+                        // Skip already-processed events; unwrap_or(0) safe: GitLab event IDs start from 1
+                        let last = state.get(project).and_then(|s| s.last_event_id).unwrap_or(0);
+                        if event_id <= last {
+                            break;
                         }
 
                         // --- Push event ---
@@ -165,14 +167,9 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                         }
                     }
 
-                    // Update last_event_id (only if we got a new one and it's not empty)
+                    // Update last_event_id
                     if let Some(id) = new_last_id {
-                        if let Some(s) = state.get_mut(project) {
-                            if s.last_event_id.is_none() {
-                                info!("{} initial event ID: {}", short_name, id);
-                            }
-                            s.last_event_id = Some(id);
-                        }
+                        state.get_mut(project).unwrap().last_event_id = Some(id);
                     }
                 }
                 Err(e) => {
@@ -182,6 +179,9 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
 
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
+
+        // After first full loop completes, enable event processing
+        first_poll = false;
 
         poll_count += 1;
         if poll_count % 30 == 0 {
@@ -245,12 +245,16 @@ fn spawn_deploy(
     let key_for_outer = key.clone();
     let key_inner = key_for_outer.clone();
     let handle = tokio::spawn(async move {
-        let (result, author_id, event_type, project_name, branch_or_tag, gitlab_event_id) = if let Some(ref pe) = push {
+        let (result, author_id, event_type, project_name, branch_or_tag, gitlab_event_id, commit_sha, author_name) = if let Some(ref pe) = push {
             let result = deployer.deploy(pe, &gitlab_url, &gitlab_token, token_clone).await;
-            (result, pe.author_id, "push".to_string(), pe.project.clone(), pe.branch.clone(), pe.event_id)
+            let commit = result.commit.clone();
+            let name = pe.author_name.clone();
+            (result, pe.author_id, "push".to_string(), pe.project.clone(), pe.branch.clone(), pe.event_id, commit, name)
         } else if let Some(ref re) = release {
             let result = deployer.release(re, &gitlab_url, &gitlab_token, token_clone).await;
-            (result, re.author_id, "release".to_string(), re.project.clone(), re.tag_name.clone(), re.event_id)
+            let commit = result.commit.clone();
+            let name = re.author_name.clone();
+            (result, re.author_id, "release".to_string(), re.project.clone(), re.tag_name.clone(), re.event_id, commit, name)
         } else {
             return;
         };
@@ -264,8 +268,8 @@ fn spawn_deploy(
         let record = DeploymentRecord {
             project: project_name.clone(),
             branch: branch_or_tag.clone(),
-            commit_sha: String::new(),
-            author_name: String::new(),
+            commit_sha,
+            author_name,
             author_email: String::new(),
             event_id: gitlab_event_id,
             event_type,

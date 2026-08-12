@@ -254,6 +254,7 @@ impl Deployer {
             .env("GITLAB_COMMIT", commit_ref)
             .env("GITLAB_AUTHOR", author_name)
             .env("GITLAB_EVENT_ID", event_id.to_string())
+            .env("VERSION", ref_name)
             .env("SRC_DIR", &repo_path)
             .env("SCRIPTS_DIR", &scripts_abs)
             .env("HARBOR_PASSWORD", &self.harbor_password)
