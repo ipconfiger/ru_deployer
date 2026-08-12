@@ -5,7 +5,6 @@
 
 use crate::config::Config;
 use crate::gitlab::GitLabClient;
-use tokio::signal;
 use tracing::{error, info};
 
 pub async fn watch_commits(cfg: &Config) -> anyhow::Result<()> {
@@ -28,11 +27,6 @@ pub async fn watch_commits(cfg: &Config) -> anyhow::Result<()> {
     let poll_interval = std::time::Duration::from_secs(cfg.gitlab.poll_interval_secs);
 
     loop {
-        if signal::ctrl_c().await.is_ok() {
-            info!("SIGINT received, shutting down...");
-            break;
-        }
-
         match client.get_commits(&encoded, branch, 1).await {
             Ok(commits) => {
                 if let Some(c) = commits.first() {
@@ -67,7 +61,4 @@ pub async fn watch_commits(cfg: &Config) -> anyhow::Result<()> {
 
         tokio::time::sleep(poll_interval).await;
     }
-
-    info!("ru_deployer commits-mode shut down");
-    Ok(())
 }

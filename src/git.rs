@@ -42,11 +42,15 @@ impl GitRepo {
         let short_name = project.rsplit('/').next().unwrap_or(project);
         let target_dir = self.src_dir.join(short_name).join(branch);
 
-        // Build auth URL
+        // Build auth URL — strip scheme from gitlab_host if present
+        let host = gitlab_host
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        let scheme = if gitlab_host.starts_with("https://") { "https" } else { "http" };
         let repo_url = if token.is_empty() {
-            format!("http://{}/{}.git", gitlab_host, project)
+            format!("{}://{}/{}.git", scheme, host, project)
         } else {
-            format!("http://oauth2:{}@{}/{}.git", token, gitlab_host, project)
+            format!("{}://oauth2:{}@{}/{}.git", scheme, token, host, project)
         };
 
         if target_dir.join(".git").exists() {
@@ -87,6 +91,93 @@ impl GitRepo {
     pub async fn short_commit(&self, repo_path: &Path) -> Result<String> {
         let full = self.current_commit(repo_path).await?;
         Ok(full.chars().take(8).collect())
+    }
+
+    /// Ensure code is available at a specific tag (release builds).
+    /// Directory: `src/<short_name>/<tag>/`
+    pub async fn ensure_tag(
+        &self,
+        gitlab_host: &str,
+        token: &str,
+        project: &str,
+        tag: &str,
+    ) -> Result<PathBuf> {
+        if tag.contains("..") {
+            anyhow::bail!("Invalid tag name (contains '..'): {}", tag);
+        }
+
+        let short_name = project.rsplit('/').next().unwrap_or(project);
+        let target_dir = self.src_dir.join(short_name).join(tag);
+
+        let host = gitlab_host
+            .trim_start_matches("http://")
+            .trim_start_matches("https://");
+        let scheme = if gitlab_host.starts_with("https://") { "https" } else { "http" };
+        let repo_url = if token.is_empty() {
+            format!("{}://{}/{}.git", scheme, host, project)
+        } else {
+            format!("{}://oauth2:{}@{}/{}.git", scheme, token, host, project)
+        };
+
+        if target_dir.join(".git").exists() {
+            debug!("Repository exists at {}, fetching tags", target_dir.display());
+            // Fetch tags with unshallow to handle shallow clones
+            let output = Command::new("git")
+                .args(["fetch", "--tags", "--unshallow", "origin"])
+                .current_dir(&target_dir)
+                .output()
+                .await
+                .context("Failed to run git fetch --tags")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git fetch --tags failed: {}", stderr);
+            }
+
+            // Checkout the tag
+            let tag_ref = format!("tags/{}", tag);
+            let output = Command::new("git")
+                .args(["checkout", &tag_ref])
+                .current_dir(&target_dir)
+                .output()
+                .await
+                .context("Failed to run git checkout tag")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git checkout tags/{} failed: {}", tag, stderr);
+            }
+
+            let output = Command::new("git")
+                .args(["reset", "--hard", &tag_ref])
+                .current_dir(&target_dir)
+                .output()
+                .await
+                .context("Failed to run git reset")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git reset failed: {}", stderr);
+            }
+        } else {
+            info!("Cloning {} @ tag {} into {}", project, tag, target_dir.display());
+            std::fs::create_dir_all(&target_dir)
+                .with_context(|| format!("Failed to create directory: {}", target_dir.display()))?;
+
+            let output = Command::new("git")
+                .args(["clone", "--depth", "1", "--branch", tag, &repo_url])
+                .arg(target_dir.as_os_str())
+                .output()
+                .await
+                .context("Failed to run git clone")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git clone failed: {}", stderr);
+            }
+        }
+
+        Ok(target_dir)
     }
 
     // --- Private helpers ---

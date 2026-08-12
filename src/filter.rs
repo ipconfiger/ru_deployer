@@ -19,6 +19,9 @@ pub struct RepoRule {
     pub project: String,
     #[serde(default)]
     pub branches: Vec<String>,
+    /// Fallback notification emails (used when GitLab author email is unavailable)
+    #[serde(default)]
+    pub emails: Vec<String>,
 }
 
 /// Runtime filter that matches push events against configured rules.
@@ -108,12 +111,13 @@ mod tests {
     #[test]
     fn test_exact_branch_match() {
         let filter = Filter {
-            repos: vec![RepoRule {
-                project: "dev-team/api".into(),
-                branches: vec!["main".into(), "develop".into()],
-            }],
-        };
-        assert!(filter.matches("dev-team/api", "main"));
+                repos: vec![RepoRule {
+                    project: "dev-team/api".into(),
+                    branches: vec!["main".into(), "develop".into()],
+                    emails: vec![],
+                }],
+            };
+            assert!(filter.matches("dev-team/api", "main"));
         assert!(filter.matches("dev-team/api", "develop"));
         assert!(!filter.matches("dev-team/api", "feature/x"));
         assert!(!filter.matches("dev-team/other", "main"));
@@ -125,6 +129,7 @@ mod tests {
             repos: vec![RepoRule {
                 project: "dev-team/api".into(),
                 branches: vec!["main".into()],
+                emails: vec![],
             }],
         };
         assert!(filter.matches("dev-team/api", "refs/heads/main"));
@@ -138,6 +143,7 @@ mod tests {
             repos: vec![RepoRule {
                 project: "dev-team/api".into(),
                 branches: vec![],
+                emails: vec![],
             }],
         };
         assert!(filter.matches("dev-team/api", "main"));
@@ -151,6 +157,7 @@ mod tests {
             repos: vec![RepoRule {
                 project: "dev-team/api".into(),
                 branches: vec!["main".into()],
+                emails: vec![],
             }],
         };
         assert!(!filter.matches("dev-team/other", "main"));

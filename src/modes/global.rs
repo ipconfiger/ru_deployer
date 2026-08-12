@@ -8,7 +8,6 @@ use crate::gitlab::GitLabClient;
 use crate::notify::Notifier;
 use crate::types::PushEvent;
 use std::sync::Arc;
-use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
@@ -40,11 +39,6 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
     let poll_interval = std::time::Duration::from_secs(cfg.gitlab.poll_interval_secs);
 
     loop {
-        if signal::ctrl_c().await.is_ok() {
-            info!("SIGINT received, shutting down...");
-            break;
-        }
-
         match client.get_global_events(10).await {
             Ok(events) => {
                 if let Some(latest) = events.first() {
@@ -95,6 +89,11 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
 
                         let gitlab_url = cfg.gitlab.url.clone();
                         let gitlab_token = cfg.gitlab.token.clone();
+                        let cc_emails = cfg.notify.cc.clone();
+                        let repo_emails = filter.repos.iter()
+                            .find(|r| r.project == push_event.project)
+                            .map(|r| r.emails.clone())
+                            .unwrap_or_default();
 
                         tokio::spawn(async move {
                             let result = deployer
@@ -112,6 +111,7 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
                                 author_name: push_event.author_name.clone(),
                                 author_email: String::new(),
                                 event_id: push_event.event_id,
+                            event_type: "push".into(),
                                 exit_code: result.exit_code,
                                 status: if result.exit_code == 0 { "success".into() } else { "failed".into() },
                                 stdout_tail: result.stdout.clone(),
@@ -121,10 +121,15 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
 
                             let _ = db.insert(&record).await;
 
-                            if notify_author {
-                                let email = client.get_user_email(push_event.author_id).await.unwrap_or_default();
-                                notifier.notify(&push_event, &result, &email).await;
+                        if notify_author {
+                            let mut email = client.get_user_email(push_event.author_id).await.unwrap_or_default();
+                            if email.is_empty() && !repo_emails.is_empty() {
+                                email = repo_emails.join(",");
+                            } else if email.is_empty() && !cc_emails.is_empty() {
+                                email = cc_emails.join(",");
                             }
+                            notifier.notify(&push_event, &result, &email).await;
+                        }
                         });
                     }
                 }
@@ -141,7 +146,4 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
 
         tokio::time::sleep(poll_interval).await;
     }
-
-    info!("ru_deployer global-mode shut down");
-    Ok(())
 }

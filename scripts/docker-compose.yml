@@ -1,0 +1,210 @@
+# =============================================================================
+# 统一 docker-compose — 四个项目 + 共享基础设施
+# 内网: internal (服务名即地址)
+# =============================================================================
+
+networks:
+  internal:
+    driver: bridge
+
+# =============================================================================
+# 共享基础设施
+# =============================================================================
+services:
+
+  mysql:
+    image: mysql:8.0
+    networks:
+      - internal
+    environment:
+      MYSQL_ROOT_PASSWORD: sH_9527!
+      MYSQL_USER: sh_admin
+      MYSQL_PASSWORD: sH_9527!
+      MYSQL_DATABASE: sh_admin
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "sh_admin", "-psH_9527!"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - internal
+    command: redis-server --requirepass sH_9527!
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "sH_9527!", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    networks:
+      - internal
+    environment:
+      RABBITMQ_DEFAULT_USER: sh_admin
+      RABBITMQ_DEFAULT_PASS: sH_9527!
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_port_connectivity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # --- API（Rust, 端口 3000） ---
+  api:
+    image: api:latest
+    networks:
+      - internal
+    ports:
+      - "3001:3000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: "mysql://sh_admin:sH_9527!@mysql:3306/sh_admin"
+      DATABASE_MAX_CONNECTIONS: "10"
+      REDIS_URL: "redis://:sH_9527!@redis:6379/0"
+      RABBITMQ_URL: "amqp://sh_admin:sH_9527%21@rabbitmq:5672/%2f"
+      JWT_SECRET: "dev-secret-change-in-production-32bytes!"
+      JWT_EXPIRATION_HOURS: "4"
+      AES_KEY_BASE64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "3000"
+      STATIC_RESOURCE_CONFIG: "/app/static_resources.yaml"
+      RUST_LOG: "info"
+      TURNSTILE_SECRET_KEY: "1x0000000000000000000000000000000AA"
+      WEBRIFY_HMAC_KEY: "dev-webrify-hmac-key-change-in-production"
+      WEBRIFY_JWT_KEY: "dev-webrify-jwt-secret-at-least-32-bytes!!"
+      WEBRIFY_ALLOWED_ORIGINS: "*"
+    volumes:
+      - ./src/api/api_release/static_resources.yaml:/app/static_resources.yaml:ro
+    restart: unless-stopped
+
+  # --- Flint（Rust gRPC, 端口 50051/9091） ---
+  flint:
+    image: flint:latest
+    networks:
+      - internal
+    ports:
+      - "50051:50051"
+      - "9091:9091"
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      # OpenStack 认证
+      OS_AUTH_URL: "http://172.16.29.18:5000/v3"
+      OS_USERNAME: "alex"
+      OS_PASSWORD: "Alex@2026"
+      OS_PROJECT_NAME: "T_3746"
+      OS_USER_DOMAIN_NAME: "Default"
+      OS_PROJECT_DOMAIN_NAME: "Default"
+      OS_REGION_NAME: "RegionOne"
+      OS_INTERFACE: "public"
+      OPENSTACK_PASSWORD: "Alex@2026"
+      OPENSTACK_AUTH_ENABLED: "true"
+      # Flint 服务端口
+      FLINT_GRPC_LISTEN: "0.0.0.0:50051"
+      FLINT_ADMIN_GRPC_LISTEN: "127.0.0.1:50052"
+      FLINT_METRICS_LISTEN: "0.0.0.0:9091"
+      FLINT_ADMIN_TOKEN: "flint-admin-change-me"
+      FLINT_RECONCILE_INTERVAL_SECS: "300"
+      # 队列
+      FLINT_QUEUE_CAPACITY: "32"
+      FLINT_ALLOCATION_TIMEOUT_SECS: "600"
+      # 重试
+      FLINT_RETRY_MAX: "3"
+      FLINT_RETRY_BASE_DELAY_MS: "1000"
+      FLINT_RETRY_MAX_DELAY_MS: "10000"
+      # Redis
+      FLINT_REDIS_URL: "redis://:sH_9527!@redis:6379"
+      FLINT_REDIS_POOL_SIZE: "16"
+      FLINT_INVENTORY_BACKEND: "memory"
+      # 日志
+      FLINT_LOG_LEVEL: "info"
+      FLINT_LOG_FORMAT: "json"
+      RUST_LOG: "info"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "grpc-health-check", "localhost:50051"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # --- Horizon（Node/Nitro 前端, 端口 3000） ---
+  horizon:
+    image: horizon:latest
+    networks:
+      - internal
+    ports:
+      - "3002:3000"
+    environment:
+      NODE_ENV: "production"
+      SESSION_SECRET: "94b6c3b0b76544ff7995c5f8109fd241ea24e50e5904e5ac9c524ac0b9d52182"
+      VITE_PRODUCT: "gpu"
+      VITE_HORIZON_API_ENDPOINT: "http://api:3000"
+      VITE_HORIZON_MANAGER_API_ENDPOINT: "http://api-manager-platform:8080"
+      VITE_WEBRIFY_TURNSTILE_ENDPOINT: "https://webrify.do.top"
+      VITE_HORIZON_CMS_API_ENDPOINT: "http://172.16.42.32:8080"
+      VITE_API_ENDPOINT: "https://api.do.top/v1"
+      VITE_PLAYGROUND_API_ENDPOINT: "http://172.16.42.36:3001/v1"
+      VITE_LOG_LEVEL: "info"
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    networks:
+      - internal
+    environment:
+      POSTGRES_USER: sh_admin
+      POSTGRES_PASSWORD: sH_9527!
+      POSTGRES_DB: api_platform
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sh_admin -d api_platform"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # --- API Manager Platform（Go 后端 + 前端, 端口 8080） ---
+  api-manager-platform:
+    image: api-manager-platform:latest
+    networks:
+      - internal
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: "8080"
+      SERVER_FRONTEND_DIR: "/var/www/frontend"
+      SERVER_ALLOWED_ORIGINS: "*"
+      JWT_SECRET: "${JWT_SECRET:-change-me-in-production}"
+    restart: unless-stopped
+
+# =============================================================================
+# 持久化卷
+# =============================================================================
+volumes:
+  mysql_data:
+  redis_data:
+  rabbitmq_data:
+  postgres_data:

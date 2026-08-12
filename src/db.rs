@@ -21,6 +21,7 @@ pub struct DeploymentRecord {
     pub author_name: String,
     pub author_email: String,
     pub event_id: u64,
+    pub event_type: String,   // "push" | "release"
     pub exit_code: i32,
     pub status: String,       // "success" or "failed"
     pub stdout_tail: String,  // head 2KB + tail 8KB
@@ -79,6 +80,7 @@ impl DeploymentDb {
                 author_name  TEXT    NOT NULL,
                 author_email TEXT    NOT NULL DEFAULT '',
                 event_id     INTEGER NOT NULL,
+                event_type   TEXT    NOT NULL DEFAULT 'push',
                 exit_code    INTEGER NOT NULL,
                 status       TEXT    NOT NULL CHECK (status IN ('success', 'failed')),
                 stdout_tail  TEXT    NOT NULL DEFAULT '',
@@ -121,9 +123,9 @@ impl DeploymentDb {
         let result = sqlx::query(
             r#"
             INSERT INTO deployments
-                (project, branch, commit_sha, author_name, author_email, event_id,
+                (project, branch, commit_sha, author_name, author_email, event_id, event_type,
                  exit_code, status, stdout_tail, stderr_tail, duration_ms)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             "#,
         )
         .bind(&record.project)
@@ -132,6 +134,7 @@ impl DeploymentDb {
         .bind(&record.author_name)
         .bind(&record.author_email)
         .bind(record.event_id as i64)
+        .bind(&record.event_type)
         .bind(record.exit_code)
         .bind(&record.status)
         .bind(&record.stdout_tail)
@@ -150,11 +153,11 @@ impl DeploymentDb {
         let rows = sqlx::query_as::<_, DeploymentRow>(
             r#"
             SELECT project, branch, commit_sha, author_name, author_email,
-                   event_id, exit_code, status, stdout_tail, stderr_tail, duration_ms
+                   event_id, event_type, exit_code, status, stdout_tail, stderr_tail, duration_ms
             FROM deployments
-            WHERE project = ?1
+            WHERE project = ?
             ORDER BY id DESC
-            LIMIT ?2;
+            LIMIT ?;
             "#,
         )
         .bind(project)
@@ -177,11 +180,11 @@ impl DeploymentDb {
         let rows = sqlx::query_as::<_, DeploymentRow>(
             r#"
             SELECT project, branch, commit_sha, author_name, author_email,
-                   event_id, exit_code, status, stdout_tail, stderr_tail, duration_ms
+                   event_id, event_type, exit_code, status, stdout_tail, stderr_tail, duration_ms
             FROM deployments
-            WHERE project = ?1 AND branch = ?2
+            WHERE project = ? AND branch = ?
             ORDER BY id DESC
-            LIMIT ?3;
+            LIMIT ?;
             "#,
         )
         .bind(project)
@@ -200,7 +203,7 @@ impl DeploymentDb {
         let total: (i64,) = sqlx::query_as(
             r#"
             SELECT COUNT(*) FROM deployments
-            WHERE project = ?1 AND created_at >= datetime('now', ?2);
+            WHERE project = ? AND created_at >= datetime('now', ?);
             "#,
         )
         .bind(project)
@@ -212,7 +215,7 @@ impl DeploymentDb {
         let success: (i64,) = sqlx::query_as(
             r#"
             SELECT COUNT(*) FROM deployments
-            WHERE project = ?1 AND status = 'success' AND created_at >= datetime('now', ?2);
+            WHERE project = ? AND status = 'success' AND created_at >= datetime('now', ?);
             "#,
         )
         .bind(project)
@@ -238,6 +241,7 @@ struct DeploymentRow {
     author_name: String,
     author_email: String,
     event_id: i64,
+    event_type: String,
     exit_code: i32,
     status: String,
     stdout_tail: String,
@@ -254,6 +258,7 @@ impl From<DeploymentRow> for DeploymentRecord {
             author_name: row.author_name,
             author_email: row.author_email,
             event_id: row.event_id as u64,
+            event_type: row.event_type,
             exit_code: row.exit_code,
             status: row.status,
             stdout_tail: row.stdout_tail,
@@ -284,6 +289,7 @@ mod tests {
             author_name: "testuser".into(),
             author_email: "test@example.com".into(),
             event_id: 12345,
+            event_type: "push".into(),
             exit_code: 0,
             status: "success".into(),
             stdout_tail: "build output".into(),
@@ -311,6 +317,7 @@ mod tests {
             author_name: "u1".into(),
             author_email: "".into(),
             event_id: 1,
+            event_type: "push".into(),
             exit_code: 0,
             status: "success".into(),
             stdout_tail: "".into(),
@@ -325,6 +332,7 @@ mod tests {
             author_name: "u2".into(),
             author_email: "".into(),
             event_id: 2,
+            event_type: "push".into(),
             exit_code: 1,
             status: "failed".into(),
             stdout_tail: "".into(),
@@ -356,6 +364,7 @@ mod tests {
                 author_name: "u".into(),
                 author_email: "".into(),
                 event_id: i as u64,
+                event_type: "push".into(),
                 exit_code: if i < 3 { 0 } else { 1 },
                 status: if i < 3 { "success".into() } else { "failed".into() },
                 stdout_tail: "".into(),

@@ -1,6 +1,7 @@
 [[repos]]
 project = "dev-team/api"
 branches = ["main", "mysql_db"]
+emails = ["23826299@qq.com"]
 
 [[repos]]
 project = "dev-team/flint"

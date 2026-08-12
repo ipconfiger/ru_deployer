@@ -4,7 +4,7 @@
 //! the running deployment is cancelled and its child process killed.
 
 use crate::git::GitRepo;
-use crate::types::PushEvent;
+use crate::types::{PushEvent, ReleaseEvent};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::process::Command;
@@ -82,43 +82,76 @@ impl Deployer {
             event.project, event.branch
         );
 
-        self.do_deploy(event, gitlab_host, gitlab_token, cancel_token)
-            .await
+        let script_name = format!("{}_deploy.sh", event.project.rsplit('/').next().unwrap_or(&event.project));
+        self.do_run(&event.project, &event.branch, &event.commit, &event.author_name, event.event_id, &script_name, gitlab_host, gitlab_token, cancel_token, false).await
     }
 
-    async fn do_deploy(
+    /// Execute a release build. If `cancel_token` fires, the running child
+    /// process is killed and the deployment returns with `cancelled: true`.
+    pub async fn release(
         &self,
-        event: &PushEvent,
+        event: &ReleaseEvent,
         gitlab_host: &str,
         gitlab_token: &str,
         cancel_token: CancellationToken,
     ) -> DeployResult {
+        info!(
+            "Starting release build for {} @ {}",
+            event.project, event.tag_name
+        );
+
+        let script_name = format!("{}_release.sh", event.project.rsplit('/').next().unwrap_or(&event.project));
+        self.do_run(&event.project, &event.tag_name, &event.tag_name, &event.author_name, event.event_id, &script_name, gitlab_host, gitlab_token, cancel_token, true).await
+    }
+
+    /// Shared implementation for deploy and release.
+    /// `ref_name` is branch for deploy, tag for release.
+    async fn do_run(
+        &self,
+        project: &str,
+        ref_name: &str,
+        commit_ref: &str,
+        author_name: &str,
+        event_id: u64,
+        script_filename: &str,
+        gitlab_host: &str,
+        gitlab_token: &str,
+        cancel_token: CancellationToken,
+        is_tag: bool,  // true = release (pull by tag), false = deploy (pull by branch)
+    ) -> DeployResult {
         let start = Instant::now();
 
-        // 1. Git pull
-        let repo_path = match self
-            .git
-            .ensure(gitlab_host, gitlab_token, &event.project, &event.branch)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                return DeployResult {
-                    exit_code: -1,
-                    stdout: String::new(),
-                    stderr: format!("Failed to pull code: {}", e),
-                    commit: String::new(),
-                    duration: start.elapsed(),
-                    cancelled: false,
-                };
+        // 1. Git pull (branch or tag)
+        let repo_path = if is_tag {
+            match self.git.ensure_tag(gitlab_host, gitlab_token, project, ref_name).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return DeployResult {
+                        exit_code: -1, stdout: String::new(),
+                        stderr: format!("Failed to pull code: {}", e),
+                        commit: String::new(), duration: start.elapsed(), cancelled: false,
+                    };
+                }
+            }
+        } else {
+            match self.git.ensure(gitlab_host, gitlab_token, project, ref_name).await {
+                Ok(p) => p,
+                Err(e) => {
+                    return DeployResult {
+                        exit_code: -1, stdout: String::new(),
+                        stderr: format!("Failed to pull code: {}", e),
+                        commit: String::new(), duration: start.elapsed(), cancelled: false,
+                    };
+                }
             }
         };
 
         let commit = self.git.current_commit(&repo_path).await.unwrap_or_default();
+        // Make repo_path absolute so the script can cd to it regardless of current_dir
+        let repo_path = repo_path.canonicalize().unwrap_or(repo_path);
 
         // 2. Find deploy script
-        let short_name = event.project.rsplit('/').next().unwrap_or(&event.project);
-        let script_name = format!("{}_deploy.sh", short_name);
+        let script_name = script_filename.to_string();
         let script_path = self.scripts_dir.join(&script_name);
 
         if !script_path.exists() {
@@ -136,7 +169,7 @@ impl Deployer {
         // 3. Execute script with cancellation + timeout
         info!("Executing deploy script: {}", script_path.display());
         let result = self
-            .run_script(&script_path, event, &repo_path, cancel_token)
+            .run_script(&script_path, project, ref_name, commit_ref, author_name, event_id, &repo_path, cancel_token)
             .await;
 
         let (exit_code, stdout_raw, stderr_raw) = match result {
@@ -145,20 +178,27 @@ impl Deployer {
                 if code == 0 {
                     info!(
                         "Deployment succeeded for {} @ {} ({}s)",
-                        event.project, event.branch, duration.as_secs()
+                        project, ref_name, duration.as_secs()
                     );
                 } else {
                     warn!(
                         "Deployment failed for {} @ {} (exit={}, {}s)",
-                        event.project, event.branch, code, duration.as_secs()
+                        project, ref_name, code, duration.as_secs()
                     );
+                }
+                // Always log script output so users can see build progress
+                if !stderr.is_empty() {
+                    info!("Script stderr:\n{}", stderr);
+                }
+                if !stdout.is_empty() {
+                    info!("Script stdout:\n{}", stdout);
                 }
                 (code, stdout, stderr)
             }
             ScriptResult::Cancelled => {
                 info!(
                     "Deployment cancelled for {} @ {}",
-                    event.project, event.branch
+                    project, ref_name
                 );
                 return DeployResult {
                     exit_code: -1,
@@ -173,8 +213,8 @@ impl Deployer {
                 error!(
                     "Deploy script timed out after {}s for {} @ {}",
                     self.script_timeout.as_secs(),
-                    event.project,
-                    event.branch
+                    project,
+                    ref_name
                 );
                 (-1, String::new(), format!("Script timed out after {}s", self.script_timeout.as_secs()))
             }
@@ -197,20 +237,25 @@ impl Deployer {
     async fn run_script(
         &self,
         script_path: &std::path::Path,
-        event: &PushEvent,
+        project: &str,
+        ref_name: &str,
+        commit_ref: &str,
+        author_name: &str,
+        event_id: u64,
         repo_path: &std::path::Path,
         cancel_token: CancellationToken,
     ) -> ScriptResult {
+        let script_abs = script_path.canonicalize().unwrap_or_else(|_| script_path.to_path_buf());
+        let scripts_abs = self.scripts_dir.canonicalize().unwrap_or_else(|_| self.scripts_dir.clone());
         let mut child = match Command::new("bash")
-            .arg(script_path)
-            .current_dir(&self.scripts_dir)
-            .env("GITLAB_PROJECT", &event.project)
-            .env("GITLAB_BRANCH", &event.branch)
-            .env("GITLAB_COMMIT", &event.commit)
-            .env("GITLAB_AUTHOR", &event.author_name)
-            .env("GITLAB_EVENT_ID", event.event_id.to_string())
-            .env("SRC_DIR", repo_path)
-            .env("SCRIPTS_DIR", &self.scripts_dir)
+            .arg(&script_abs)
+            .env("GITLAB_PROJECT", project)
+            .env("GITLAB_BRANCH", ref_name)
+            .env("GITLAB_COMMIT", commit_ref)
+            .env("GITLAB_AUTHOR", author_name)
+            .env("GITLAB_EVENT_ID", event_id.to_string())
+            .env("SRC_DIR", &repo_path)
+            .env("SCRIPTS_DIR", &scripts_abs)
             .env("HARBOR_PASSWORD", &self.harbor_password)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

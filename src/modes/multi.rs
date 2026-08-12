@@ -1,4 +1,5 @@
 //! Multi-project independent polling mode with parallel deployments.
+//! Supports both push and release events.
 
 use crate::config::Config;
 use crate::db::{DeploymentDb, DeploymentRecord};
@@ -6,11 +7,10 @@ use crate::deploy::Deployer;
 use crate::filter::Filter;
 use crate::gitlab::GitLabClient;
 use crate::notify::Notifier;
-use crate::types::PushEvent;
+use crate::types::{PushEvent, ReleaseEvent};
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::signal;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -22,11 +22,11 @@ struct ProjectState {
     short_name: String,
 }
 
-/// Active deployment (abortable) per project:branch.
+/// Active deployment per project:branch or project:release:tag.
+#[allow(dead_code)]
 struct ActiveDeploy {
     cancel_token: CancellationToken,
-    #[allow(dead_code)]
-    join_handle: JoinHandle<()>, // keep alive to detect completion
+    join_handle: JoinHandle<()>,
 }
 
 pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
@@ -45,10 +45,8 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
     let notifier = Arc::new(Notifier::new(cfg.notify.msg_platform_url.clone())?);
     let db = Arc::new(DeploymentDb::open(&cfg.database.path).await?);
 
-    // Active deployments: key = "project:branch"
     let active: Arc<DashMap<String, ActiveDeploy>> = Arc::new(DashMap::new());
 
-    // Build project state map
     let mut state: HashMap<String, ProjectState> = HashMap::new();
     let projects: Vec<String> = filter.project_paths().map(String::from).collect();
 
@@ -82,34 +80,33 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
     let mut poll_count: u64 = 0;
 
     loop {
-        if signal::ctrl_c().await.is_ok() {
-            info!("SIGINT received, shutting down...");
-            break;
-        }
-
         for project in &projects {
-            let (encoded_path, short_name, last_id, is_initial) = {
+            let (encoded_path, short_name, last_id) = {
                 let s = match state.get(project) {
                     Some(s) => s,
                     None => continue,
                 };
-                (s.encoded_path.clone(), s.short_name.clone(), s.last_event_id, s.last_event_id.is_none())
+                (s.encoded_path.clone(), s.short_name.clone(), s.last_event_id)
             };
 
-            match client.get_project_events(&encoded_path, 3).await {
+            match client.get_project_events_unfiltered(&encoded_path).await {
                 Ok(events) => {
-                    if let Some(latest) = events.first() {
+                    let new_last_id = events.first().map(|e| e.id);
+
+                    // Traverse ALL events (not just first) to avoid missing push/release
+                    for latest in &events {
                         let event_id = latest.id;
 
-                        if is_initial {
-                            state.get_mut(project).unwrap().last_event_id = Some(event_id);
-                            info!("{} initial event ID: {}", short_name, event_id);
-                        } else if event_id != last_id.unwrap() {
-                            state.get_mut(project).unwrap().last_event_id = Some(event_id);
+                        // Skip already-processed events
+                        if let Some(last) = last_id {
+                            if event_id <= last {
+                                break;
+                            }
+                        }
 
-                            let branch = latest
-                                .push_data
-                                .as_ref()
+                        // --- Push event ---
+                        if latest.push_data.is_some() {
+                            let branch = latest.push_data.as_ref()
                                 .map(|pd| pd.r#ref.as_str())
                                 .unwrap_or("");
 
@@ -119,78 +116,52 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
 
                             let push_event = match PushEvent::from_event(latest, Some(project)) {
                                 Some(pe) => pe,
-                                None => {
-                                    warn!("Failed to parse push event for {}", project);
-                                    continue;
-                                }
+                                None => { warn!("Failed to parse push event for {}", project); continue; }
                             };
 
+                            info!("Push detected: {} @ {} (commit: {:.8})",
+                                push_event.project, push_event.branch, push_event.commit);
+
                             let deploy_key = format!("{}:{}", push_event.project, push_event.branch);
+                            spawn_deploy(
+                                deploy_key, Some(push_event), None,
+                                &deployer, &client, &notifier, &db,
+                                &cfg.gitlab.url, &cfg.gitlab.token,
+                                cfg.notify.notify_author,
+                                &active,
+                                &filter,
+                                &cfg.notify.cc,
+                            );
+                        }
+                        // --- Release event ---
+                        else if latest.target_type.as_deref() == Some("Release") {
+                            let release_event = match ReleaseEvent::from_event(latest, project) {
+                                Some(re) => re,
+                                None => { warn!("Failed to parse release event for {}", project); continue; }
+                            };
 
-                            // Cancel previous deployment for same project:branch
-                            if let Some((_k, old)) = active.remove(&deploy_key) {
-                                info!("Cancelling previous deployment for {}", deploy_key);
-                                old.cancel_token.cancel();
+                            info!("Release detected: {} tag={}", release_event.project, release_event.tag_name);
+
+                            let deploy_key = format!("{}:release:{}", release_event.project, release_event.tag_name);
+                            spawn_deploy(
+                                deploy_key, None, Some(release_event),
+                                &deployer, &client, &notifier, &db,
+                                &cfg.gitlab.url, &cfg.gitlab.token,
+                                cfg.notify.notify_author,
+                                &active,
+                                &filter,
+                                &cfg.notify.cc,
+                            );
+                        }
+                    }
+
+                    // Update last_event_id (only if we got a new one and it's not empty)
+                    if let Some(id) = new_last_id {
+                        if let Some(s) = state.get_mut(project) {
+                            if s.last_event_id.is_none() {
+                                info!("{} initial event ID: {}", short_name, id);
                             }
-
-                            // Spawn new deployment (non-blocking)
-                            let deployer = deployer.clone();
-                            let client = client.clone();
-                            let notifier = notifier.clone();
-                            let db = db.clone();
-                            let notify_author = cfg.notify.notify_author;
-                            let active_map = active.clone();
-                            let token = CancellationToken::new();
-                            let token_clone = token.clone();
-                            let key = deploy_key.clone();
-
-                            let gitlab_url = cfg.gitlab.url.clone();
-                            let gitlab_token = cfg.gitlab.token.clone();
-
-                            let handle = tokio::spawn(async move {
-                                let result = deployer
-                                    .deploy(&push_event, &gitlab_url, &gitlab_token, token_clone)
-                                    .await;
-
-                                if result.cancelled {
-                                    info!("Deployment {} was cancelled", key);
-                                    active_map.remove(&key);
-                                    return;
-                                }
-
-                                // Record to DB
-                                let record = DeploymentRecord {
-                                    project: push_event.project.clone(),
-                                    branch: push_event.branch.clone(),
-                                    commit_sha: push_event.commit.clone(),
-                                    author_name: push_event.author_name.clone(),
-                                    author_email: String::new(),
-                                    event_id: push_event.event_id,
-                                    exit_code: result.exit_code,
-                                    status: if result.exit_code == 0 { "success".into() } else { "failed".into() },
-                                    stdout_tail: result.stdout.clone(),
-                                    stderr_tail: result.stderr.clone(),
-                                    duration_ms: result.duration.as_millis() as i64,
-                                };
-
-                                if let Err(e) = db.insert(&record).await {
-                                    error!("Failed to record deployment: {}", e);
-                                }
-
-                                // Send notification
-                                if notify_author {
-                                    let email = client.get_user_email(push_event.author_id).await.unwrap_or_default();
-                                    notifier.notify(&push_event, &result, &email).await;
-                                }
-
-                                // Clean up active entry
-                                active_map.remove(&key);
-                            });
-
-                            active.insert(deploy_key, ActiveDeploy {
-                                cancel_token: token,
-                                join_handle: handle,
-                            });
+                            s.last_event_id = Some(id);
                         }
                     }
                 }
@@ -204,17 +175,117 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
 
         poll_count += 1;
         if poll_count % 30 == 0 {
-            let ids: Vec<String> = state
-                .values()
+            let ids: Vec<String> = state.values()
                 .map(|s| format!("{}={}", s.short_name, s.last_event_id.map_or("?".into(), |id| id.to_string())))
                 .collect();
-            let active_count = active.len();
-            info!("Heartbeat - {} polls [{}] (active deploys: {})", poll_count, ids.join(", "), active_count);
+            info!("Heartbeat - {} polls [{}] (active: {})", poll_count, ids.join(", "), active.len());
         }
 
         tokio::time::sleep(poll_interval).await;
     }
+}
 
-    info!("ru_deployer multi-mode shut down");
-    Ok(())
+/// Spawn a deploy or release task with cancellation support.
+fn spawn_deploy(
+    key: String,
+    push: Option<PushEvent>,
+    release: Option<ReleaseEvent>,
+    deployer: &Arc<Deployer>,
+    client: &Arc<GitLabClient>,
+    notifier: &Arc<Notifier>,
+    db: &Arc<DeploymentDb>,
+    gitlab_url: &str,
+    gitlab_token: &str,
+    notify_author: bool,
+    active: &Arc<DashMap<String, ActiveDeploy>>,
+    filter: &Filter,
+    cc_emails: &[String],
+) {
+    // Cancel previous deployment for same key
+    if let Some((_k, old)) = active.remove(&key) {
+        info!("Cancelling previous deployment for {}", key);
+        old.cancel_token.cancel();
+    }
+
+    let deployer = deployer.clone();
+    let client = client.clone();
+    let notifier = notifier.clone();
+    let db = db.clone();
+    let active_map = active.clone();
+    let gitlab_url = gitlab_url.to_string();
+    let gitlab_token = gitlab_token.to_string();
+    let cc_emails = cc_emails.to_vec();
+    let repo_emails = if let Some(ref re) = release {
+        filter.repos.iter()
+            .find(|r| r.project == re.project)
+            .map(|r| r.emails.clone())
+            .unwrap_or_default()
+    } else if let Some(ref pe) = push {
+        filter.repos.iter()
+            .find(|r| r.project == pe.project)
+            .map(|r| r.emails.clone())
+            .unwrap_or_default()
+    } else {
+        vec![]
+    };
+
+    let token = CancellationToken::new();
+    let token_clone = token.clone();
+
+    let key_for_outer = key.clone();
+    let key_inner = key_for_outer.clone();
+    let handle = tokio::spawn(async move {
+        let (result, author_id, event_type, project_name, branch_or_tag) = if let Some(ref pe) = push {
+            let result = deployer.deploy(pe, &gitlab_url, &gitlab_token, token_clone).await;
+            (result, pe.author_id, "push".to_string(), pe.project.clone(), pe.branch.clone())
+        } else if let Some(ref re) = release {
+            let result = deployer.release(re, &gitlab_url, &gitlab_token, token_clone).await;
+            (result, re.author_id, "release".to_string(), re.project.clone(), re.tag_name.clone())
+        } else {
+            return;
+        };
+
+        if result.cancelled {
+            info!("Deployment {} was cancelled", key);
+            active_map.remove(&key);
+            return;
+        }
+
+        let record = DeploymentRecord {
+            project: project_name.clone(),
+            branch: branch_or_tag.clone(),
+            commit_sha: String::new(),
+            author_name: String::new(),
+            author_email: String::new(),
+            event_id: 0,
+            event_type,
+            exit_code: result.exit_code,
+            status: if result.exit_code == 0 { "success".into() } else { "failed".into() },
+            stdout_tail: result.stdout.clone(),
+            stderr_tail: result.stderr.clone(),
+            duration_ms: result.duration.as_millis() as i64,
+        };
+
+        if let Err(e) = db.insert(&record).await {
+            error!("Failed to record deployment: {}", e);
+        }
+
+        if notify_author {
+            let mut email = client.get_user_email(author_id).await.unwrap_or_default();
+            if email.is_empty() && !repo_emails.is_empty() {
+                email = repo_emails.join(",");
+            } else if email.is_empty() && !cc_emails.is_empty() {
+                email = cc_emails.join(",");
+            }
+            if let Some(ref pe) = push {
+                notifier.notify(pe, &result, &email).await;
+            } else if let Some(ref re) = release {
+                notifier.notify_release(re, &result, &email).await;
+            }
+        }
+
+        active_map.remove(&key_inner);
+    });
+
+    active.insert(key_for_outer, ActiveDeploy { cancel_token: token, join_handle: handle });
 }

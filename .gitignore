@@ -1,3 +1,7 @@
 target/
 data/
 *.db
+src/api/
+src/flint/
+src/horizon/
+src/api-manager-platform/

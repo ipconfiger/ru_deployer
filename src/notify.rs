@@ -3,7 +3,7 @@
 //! Sends HTML emails for deployment success/failure.
 
 use crate::deploy::DeployResult;
-use crate::types::PushEvent;
+use crate::types::{PushEvent, ReleaseEvent};
 use anyhow::{Context, Result};
 use reqwest::Client;
 use serde::Serialize;
@@ -132,6 +132,72 @@ impl Notifier {
             }
             Err(e) => {
                 error!("Failed to send email notification: {}", e);
+            }
+        }
+    }
+
+    /// Send a release build result notification.
+    pub async fn notify_release(
+        &self,
+        event: &ReleaseEvent,
+        result: &DeployResult,
+        author_email: &str,
+    ) {
+        if author_email.is_empty() {
+            info!("No author email available, skipping release notification");
+            return;
+        }
+
+        let (status_icon, status_text) = if result.exit_code == 0 {
+            ("✅", "成功")
+        } else {
+            ("❌", "失败")
+        };
+
+        let subject = format!(
+            "[{}] {} Release {} 构建{}",
+            status_icon,
+            event.project.rsplit('/').next().unwrap_or(&event.project),
+            event.tag_name,
+            status_text
+        );
+
+        let content = format!(
+            r#"<h2>{} Release 构建{}</h2>
+<p><strong>项目:</strong> {}</p>
+<p><strong>版本:</strong> {}</p>
+<p><strong>退出码:</strong> {}</p>
+<p><strong>耗时:</strong> {}s</p>"#,
+            status_icon,
+            status_text,
+            html_escape(&event.project),
+            html_escape(&event.tag_name),
+            result.exit_code,
+            result.duration.as_secs(),
+        );
+
+        let req = SendRawRequest {
+            to: &[author_email.to_string()],
+            subject,
+            content_type: "html",
+            content,
+        };
+
+        let url = format!("{}/api/v1/mail/send_raw", self.api_url.trim_end_matches('/'));
+
+        match self.client.post(&url).json(&req).send().await {
+            Ok(resp) => {
+                let body: serde_json::Value = resp.json().await.unwrap_or_default();
+                if body.get("code").and_then(|c| c.as_i64()) == Some(0) {
+                    let msg_id = body["data"]["message_id"].as_str().unwrap_or("?");
+                    info!("Release email sent to {} (message_id={})", author_email, msg_id);
+                } else {
+                    let msg = body.get("message").and_then(|m| m.as_str()).unwrap_or("unknown");
+                    error!("Release email API returned error: {}", msg);
+                }
+            }
+            Err(e) => {
+                error!("Failed to send release email notification: {}", e);
             }
         }
     }

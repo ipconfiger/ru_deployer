@@ -143,3 +143,30 @@ impl PushEvent {
         })
     }
 }
+
+/// A high-level release event, normalized from Event API data when target_type=Release.
+#[derive(Debug, Clone)]
+pub struct ReleaseEvent {
+    pub project: String,
+    pub tag_name: String,
+    pub author_name: String,
+    pub author_id: u64,
+    pub event_id: u64,
+}
+
+impl ReleaseEvent {
+    pub fn from_event(event: &Event, project_name: &str) -> Option<Self> {
+        let tag_name = event.target_title.as_deref()?;
+        Some(Self {
+            project: project_name.to_string(),
+            tag_name: tag_name.to_string(),
+            author_name: event
+                .author
+                .as_ref()
+                .map(|a| a.name.clone())
+                .unwrap_or_else(|| "unknown".into()),
+            author_id: event.author_id,
+            event_id: event.id,
+        })
+    }
+}

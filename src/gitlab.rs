@@ -102,6 +102,34 @@ impl GitLabClient {
         Ok(events)
     }
 
+    /// Fetch project events without action filter (for detecting both push + release).
+    /// Uses per_page=10 to avoid missing events when interleaved with issue/comment events.
+    pub async fn get_project_events_unfiltered(
+        &self,
+        project_path: &str,
+    ) -> Result<Vec<Event>> {
+        let url = format!("{}/api/v4/projects/{}/events", self.base_url, project_path);
+        debug!("GET {} (unfiltered)", url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .headers(self.headers())
+            .query(&[("per_page", "10")])
+            .send()
+            .await
+            .with_context(|| format!("Failed to fetch events for project: {}", project_path))?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            anyhow::bail!("Authentication failed — check GITLAB_TOKEN");
+        }
+        resp.error_for_status_ref()?;
+
+        let events: Vec<Event> = resp.json().await.context("Failed to parse events JSON")?;
+        debug!("Got {} events (unfiltered) for project {}", events.len(), project_path);
+        Ok(events)
+    }
+
     // === Commits API ===
 
     /// Fetch the latest commits for a branch.
@@ -201,6 +229,10 @@ impl GitLabClient {
         resp.error_for_status_ref()?;
 
         let user: GitLabUser = resp.json().await?;
-        Ok(user.email)
+        Ok(if !user.email.is_empty() {
+            user.email
+        } else {
+            user.public_email
+        })
     }
 }
