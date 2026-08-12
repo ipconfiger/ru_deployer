@@ -7,7 +7,11 @@
 ### 1.1 保留的功能（继承自 listen_push.py）
 
 - 轮询 GitLab REST API，检测 push 事件
-- 四种监听模式：`commits`、`events`、`global`、`multi`
+- 四种监听模式：
+  - `commits` — **仅监控**，检测到新 commit 时打印信息，不触发部署
+  - `events` — 单项目 push 事件监听，触发部署
+  - `global` — 全局 push 事件监听，触发部署
+  - `multi` — 多项目独立轮询（默认，推荐），触发部署
 - 项目/分支过滤器（原 `listen_filter.json`）
 - 调用外部部署脚本（`*_deploy.sh`）
 - 部署结果邮件通知
@@ -48,6 +52,7 @@ ru_deployer
 └── src/                     # Rust 源码
     ├── main.rs              # 入口，CLI 解析，模式分发
     ├── config.rs            # 配置加载（TOML + 环境变量覆盖）
+    ├── types.rs             # 共享数据类型（Event, PushEvent, Commit 等）
     ├── filter.rs            # 事件过滤器
     ├── gitlab.rs            # GitLab API 客户端
     ├── git.rs               # Git 操作（clone / fetch / checkout）
@@ -119,8 +124,21 @@ mode = "multi"
 scripts_dir = "./scripts"
 # Git 源码存放根目录
 src_dir = "./src"
+# 脚本执行超时（秒），默认 1800（30 分钟）
+script_timeout_secs = 1800
+# 单项目模式专用（events / commits）: 监控的项目路径
+# project = "dev-team/api"
 # commits 模式专用: 监控分支
-branch = "main"
+# branch = "main"
+
+[harbor]
+# Harbor registry 认证（传给子进程 push_harbor.sh）
+# 也可通过环境变量 HARBOR_PASSWORD 传入
+registry = "172.16.29.88:30800"
+project = "gpu"
+user = "robot$gpu+gpubot"
+password = ""
+# 无密码时静默跳过推送
 
 [filter]
 # 过滤器文件路径（mode=multi 时必填）
@@ -180,6 +198,8 @@ export RU_DEPLOYER_NOTIFY_MSG_PLATFORM_URL="http://..."
 
 也可以通过 `RU_DEPLOYER_CONFIG` 指定配置文件路径（默认 `./config.toml`）。
 
+此外，Rust 启动时会自动加载工作目录下的 `.env` 文件（使用 `dotenvy` crate），方便将敏感信息（如 `GITLAB_TOKEN`、`HARBOR_PASSWORD`）从配置文件中分离。`.env` 中的变量优先级低于 `RU_DEPLOYER_*` 环境变量，但高于 `config.toml`。
+
 ---
 
 ## 4. 模块详细设计
@@ -213,6 +233,8 @@ impl GitLabClient {
 }
 ```
 
+> **共享类型**: `Event`、`Commit`、`PushData`、`PushEvent` 等 API 返回类型定义在 `src/types.rs`，被 `gitlab.rs`、`deploy.rs`、`notify.rs` 共享引用。
+
 **事件轮询策略**（各模式共享）:
 - 维护 `last_event_id`（或 `last_commit_sha`）
 - 每次轮询比较最新记录 ID
@@ -243,6 +265,10 @@ impl Filter {
 3. `branches` 为空 → 该项目全部分支放行
 4. `branches` 非空 → 精确匹配分支名
 
+> **refs/heads/ 前缀**: GitLab Events API 返回的分支名如 `refs/heads/main`。`matches()` 方法内部会自动 strip `refs/heads/` 前缀后再匹配，调用方无需处理。
+
+**启动验证**: `multi` 模式启动时，对 filter 中所有项目发送一次 API 探测（如查询 `/projects/:id`），验证项目存在且 token 有权限。不存在的项目打印 WARNING 但不阻止启动，方便运维及时发现配置错误。
+
 ### 4.3 `git.rs` — Git 操作
 
 **职责**: 将部署脚本中的 git clone/fetch 逻辑移入 Rust。
@@ -254,7 +280,8 @@ pub struct GitRepo {
 
 impl GitRepo {
     /// 确保本地有指定项目+分支的最新代码
-    /// 目录结构: src/<project>/<branch>/
+    /// 目录结构: src/<short_name>/<branch>/
+    /// 其中 short_name = project 的最后一段（如 "dev-team/api" → "api"）
     pub async fn ensure(
         &self,
         gitlab_url: &str,
@@ -327,18 +354,36 @@ impl Deployer {
 }
 ```
 
-**脚本执行环境变量**（与 Python 版兼容）：
+**脚本执行环境变量**（与 Python 版兼容，全部由 Rust 注入子进程）：
 
-| 变量 | 值 |
-|---|---|
-| `GITLAB_PROJECT` | `dev-team/api` |
-| `GITLAB_BRANCH` | `main` |
-| `GITLAB_COMMIT` | 完整 SHA |
-| `GITLAB_AUTHOR` | 提交者用户名 |
-| `GITLAB_EVENT_ID` | 事件 ID |
-| `SRC_DIR` | `src/<project>/<branch>` (新增，脚本可直接用) |
+| 变量 | 值 | 来源 |
+|---|---|---|
+| `GITLAB_PROJECT` | `dev-team/api` | push event |
+| `GITLAB_BRANCH` | `main` (不含 `refs/heads/` 前缀) | push event |
+| `GITLAB_COMMIT` | 完整 SHA | push event |
+| `GITLAB_AUTHOR` | 提交者用户名 | push event |
+| `GITLAB_EVENT_ID` | 事件 ID | push event |
+| `SRC_DIR` | `src/api/main/` | Rust git 拉取后的绝对路径 |
+| `HARBOR_PASSWORD` | Harbor 密码 | `config.toml` `[harbor].password` 或环境变量 |
+| `SCRIPTS_DIR` | 脚本目录绝对路径 | `config.toml` `[deploy].scripts_dir` |
 
-**并发控制**: 同一项目同一分支的部署串行化（`DashMap<Key, Mutex<()>>`），避免同一事件触发多次部署。
+**超时控制**: 脚本执行通过 `tokio::time::timeout` 包裹，超时值由 `[deploy].script_timeout_secs` 配置（默认 1800 秒）。超时后子进程被 SIGKILL，视为部署失败。
+
+**并发控制**: 同一项目同一分支的部署串行化，避免重复触发。
+
+使用 `tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>` 方案：
+- 外层 Mutex 保护 HashMap 的读写
+- 内层 Arc<Mutex<()>> 是每个项目+分支的独立锁
+- 获取锁后快速释放外层 Mutex，然后在持有内层锁的情况下执行 `.await` 操作
+- 避免了 `std::sync::Mutex` 在 async 上下文中的阻塞问题
+
+```
+get_or_create_lock("api:main")
+  → lock outer → get/insert inner Mutex → unlock outer
+  → lock inner (serializes this project+branch)
+  → do async work (git, deploy, notify, db)
+  → unlock inner
+```
 
 ### 4.5 `notify.rs` — 邮件通知
 
@@ -359,7 +404,7 @@ impl Notifier {
 **邮件模板**:
 
 - **成功**: 项目、分支、commit、时间，绿色标题
-- **失败**: 同上 + 红色标题 + 错误日志（`stderr` + `stdout` 末尾 3000 字符），深色背景 `<pre>` 块
+- **失败**: 同上 + 红色标题 + 错误日志（`stderr` 头 2KB + `stdout` 尾 8KB），深色背景 `<pre>` 块
 - 邮件主题: `[✅/❌] <project>@<branch> 部署<成功/失败>`
 
 **API 调用**（兼容现有消息平台）:
@@ -394,8 +439,8 @@ pub struct DeploymentRecord {
     pub event_id: u64,              // GitLab event ID
     pub exit_code: i32,             // 部署脚本退出码 (0=成功)
     pub status: DeploymentStatus,   // 成功 / 失败
-    pub stdout_tail: String,        // stdout 末尾 (限 10KB)
-    pub stderr_tail: String,        // stderr 末尾 (限 10KB)
+    pub stdout_tail: String,        // stdout 头 2KB + 尾 8KB (限 10KB)
+    pub stderr_tail: String,        // stderr 头 2KB + 尾 8KB (限 10KB)
     pub duration_ms: i64,           // 部署耗时 (毫秒)
     pub created_at: DateTime<Utc>,  // 部署时间
 }
@@ -454,9 +499,10 @@ CREATE INDEX IF NOT EXISTS idx_deployments_created_at ON deployments(created_at)
 ```
 
 **设计要点**:
-- 输出截断：`stdout`/`stderr` 仅保留末尾 10KB，避免数据库膨胀
+- 输出截断：`stdout`/`stderr` 采用"头 2KB + 尾 8KB"策略，保留开头（编译错误通常在头几行）和末尾（脚本最终输出），避免数据库膨胀
 - 时间使用 ISO 8601 文本存储，SQLite 无原生 datetime 类型
-- Migration 在 `open()` 时自动执行，使用 `sqlx::migrate!` 或手动 DDL
+- Migration 在 `open()` 时自动执行，使用手动 DDL（`CREATE TABLE IF NOT EXISTS`），比 `sqlx::migrate!` 更简单（单表场景无需编译期 SQL 文件管理）
+- 数据库启用 WAL 模式：`PRAGMA journal_mode=WAL;`
 - 历史查询接口为日后回滚功能提供数据基础（回滚方案待定）
 
 ---
