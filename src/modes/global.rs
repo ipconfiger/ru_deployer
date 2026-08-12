@@ -2,13 +2,14 @@
 
 use crate::config::Config;
 use crate::db::{DeploymentDb, DeploymentRecord};
-use crate::deploy::{DeployResult, Deployer};
+use crate::deploy::Deployer;
 use crate::filter::Filter;
 use crate::gitlab::GitLabClient;
 use crate::notify::Notifier;
 use crate::types::PushEvent;
 use std::sync::Arc;
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
@@ -31,6 +32,7 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
 
     let mut last_event_id: Option<u64> = None;
     let mut poll_count: u64 = 0;
+    let mut active_tokens: Vec<CancellationToken> = Vec::new();
 
     info!("Global mode: monitoring all push events{} (interval {}s)",
         filter_info, cfg.gitlab.poll_interval_secs);
@@ -80,35 +82,50 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
                         info!("Push detected: {} @ {} (commit: {:.8})",
                             push_event.project, push_event.branch, push_event.commit);
 
-                        let result = deployer
-                            .deploy(&push_event, &cfg.gitlab.url, &cfg.gitlab.token)
-                            .await
-                            .unwrap_or_else(|e| DeployResult {
-                                exit_code: -1, stdout: String::new(),
-                                stderr: format!("{}", e), commit: String::new(),
-                                duration: std::time::Duration::ZERO,
-                            });
+                        let cancel = CancellationToken::new();
+                        let cancel_clone = cancel.clone();
+                        let deployer = deployer.clone();
+                        let client = client.clone();
+                        let notifier = notifier.clone();
+                        let db = db.clone();
+                        let notify_author = cfg.notify.notify_author;
 
-                        let record = DeploymentRecord {
-                            project: push_event.project.clone(),
-                            branch: push_event.branch.clone(),
-                            commit_sha: push_event.commit.clone(),
-                            author_name: push_event.author_name.clone(),
-                            author_email: String::new(),
-                            event_id: push_event.event_id,
-                            exit_code: result.exit_code,
-                            status: if result.exit_code == 0 { "success".into() } else { "failed".into() },
-                            stdout_tail: result.stdout.clone(),
-                            stderr_tail: result.stderr.clone(),
-                            duration_ms: result.duration.as_millis() as i64,
-                        };
+                        active_tokens.retain(|t| !t.is_cancelled());
+                        active_tokens.push(cancel);
 
-                        let _ = db.insert(&record).await;
+                        let gitlab_url = cfg.gitlab.url.clone();
+                        let gitlab_token = cfg.gitlab.token.clone();
 
-                        if cfg.notify.notify_author {
-                            let email = client.get_user_email(push_event.author_id).await.unwrap_or_default();
-                            notifier.notify(&push_event, &result, &email).await;
-                        }
+                        tokio::spawn(async move {
+                            let result = deployer
+                                .deploy(&push_event, &gitlab_url, &gitlab_token, cancel_clone)
+                                .await;
+
+                            if result.cancelled {
+                                return;
+                            }
+
+                            let record = DeploymentRecord {
+                                project: push_event.project.clone(),
+                                branch: push_event.branch.clone(),
+                                commit_sha: push_event.commit.clone(),
+                                author_name: push_event.author_name.clone(),
+                                author_email: String::new(),
+                                event_id: push_event.event_id,
+                                exit_code: result.exit_code,
+                                status: if result.exit_code == 0 { "success".into() } else { "failed".into() },
+                                stdout_tail: result.stdout.clone(),
+                                stderr_tail: result.stderr.clone(),
+                                duration_ms: result.duration.as_millis() as i64,
+                            };
+
+                            let _ = db.insert(&record).await;
+
+                            if notify_author {
+                                let email = client.get_user_email(push_event.author_id).await.unwrap_or_default();
+                                notifier.notify(&push_event, &result, &email).await;
+                            }
+                        });
                     }
                 }
             }
@@ -117,8 +134,9 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
 
         poll_count += 1;
         if poll_count % 30 == 0 {
-            info!("Heartbeat - {} polls [event_id={}]", poll_count,
-                last_event_id.map_or("?".into(), |id| id.to_string()));
+            active_tokens.retain(|t| !t.is_cancelled());
+            info!("Heartbeat - {} polls [event_id={}] (active: {})", poll_count,
+                last_event_id.map_or("?".into(), |id| id.to_string()), active_tokens.len());
         }
 
         tokio::time::sleep(poll_interval).await;

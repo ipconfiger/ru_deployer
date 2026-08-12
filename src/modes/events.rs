@@ -2,13 +2,14 @@
 
 use crate::config::Config;
 use crate::db::{DeploymentDb, DeploymentRecord};
-use crate::deploy::{DeployResult, Deployer};
+use crate::deploy::Deployer;
 use crate::filter::Filter;
 use crate::gitlab::GitLabClient;
 use crate::notify::Notifier;
 use crate::types::PushEvent;
 use std::sync::Arc;
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
 pub async fn watch_events(cfg: &Config) -> anyhow::Result<()> {
@@ -32,6 +33,7 @@ pub async fn watch_events(cfg: &Config) -> anyhow::Result<()> {
     let encoded = project.replace('/', "%2F");
     let mut last_event_id: Option<u64> = None;
     let mut poll_count: u64 = 0;
+    let mut active_token: Option<CancellationToken> = None;
 
     info!("Events mode: monitoring {} (interval {}s)", project, cfg.gitlab.poll_interval_secs);
 
@@ -69,38 +71,55 @@ pub async fn watch_events(cfg: &Config) -> anyhow::Result<()> {
                             }
                         };
 
-                        info!("Push detected: {} @ {} (commit: {:.8})",
-                            push_event.project, push_event.branch, push_event.commit);
-
-                        let result = deployer
-                            .deploy(&push_event, &cfg.gitlab.url, &cfg.gitlab.token)
-                            .await
-                            .unwrap_or_else(|e| DeployResult {
-                                exit_code: -1, stdout: String::new(),
-                                stderr: format!("{}", e), commit: String::new(),
-                                duration: std::time::Duration::ZERO,
-                            });
-
-                        let record = DeploymentRecord {
-                            project: push_event.project.clone(),
-                            branch: push_event.branch.clone(),
-                            commit_sha: push_event.commit.clone(),
-                            author_name: push_event.author_name.clone(),
-                            author_email: String::new(),
-                            event_id: push_event.event_id,
-                            exit_code: result.exit_code,
-                            status: if result.exit_code == 0 { "success".into() } else { "failed".into() },
-                            stdout_tail: result.stdout.clone(),
-                            stderr_tail: result.stderr.clone(),
-                            duration_ms: result.duration.as_millis() as i64,
-                        };
-
-                        let _ = db.insert(&record).await;
-
-                        if cfg.notify.notify_author {
-                            let email = client.get_user_email(push_event.author_id).await.unwrap_or_default();
-                            notifier.notify(&push_event, &result, &email).await;
+                        // Cancel previous deployment
+                        if let Some(token) = active_token.take() {
+                            info!("Cancelling previous deployment for {}", project);
+                            token.cancel();
                         }
+
+                        let cancel = CancellationToken::new();
+                        let cancel_clone = cancel.clone();
+                        let deployer = deployer.clone();
+                        let client = client.clone();
+                        let notifier = notifier.clone();
+                        let db = db.clone();
+                        let notify_author = cfg.notify.notify_author;
+
+                        active_token = Some(cancel);
+
+                        let gitlab_url = cfg.gitlab.url.clone();
+                        let gitlab_token = cfg.gitlab.token.clone();
+
+                        tokio::spawn(async move {
+                            let result = deployer
+                                .deploy(&push_event, &gitlab_url, &gitlab_token, cancel_clone)
+                                .await;
+
+                            if result.cancelled {
+                                return;
+                            }
+
+                            let record = DeploymentRecord {
+                                project: push_event.project.clone(),
+                                branch: push_event.branch.clone(),
+                                commit_sha: push_event.commit.clone(),
+                                author_name: push_event.author_name.clone(),
+                                author_email: String::new(),
+                                event_id: push_event.event_id,
+                                exit_code: result.exit_code,
+                                status: if result.exit_code == 0 { "success".into() } else { "failed".into() },
+                                stdout_tail: result.stdout.clone(),
+                                stderr_tail: result.stderr.clone(),
+                                duration_ms: result.duration.as_millis() as i64,
+                            };
+
+                            let _ = db.insert(&record).await;
+
+                            if notify_author {
+                                let email = client.get_user_email(push_event.author_id).await.unwrap_or_default();
+                                notifier.notify(&push_event, &result, &email).await;
+                            }
+                        });
                     }
                 }
             }

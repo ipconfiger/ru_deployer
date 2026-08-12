@@ -83,6 +83,7 @@ impl GitRepo {
     }
 
     /// Get the short HEAD commit SHA (first 8 chars).
+    #[allow(dead_code)]
     pub async fn short_commit(&self, repo_path: &Path) -> Result<String> {
         let full = self.current_commit(repo_path).await?;
         Ok(full.chars().take(8).collect())

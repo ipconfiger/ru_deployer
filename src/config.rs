@@ -5,6 +5,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
 /// Top-level application configuration.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub gitlab: GitLabConfig,
@@ -48,6 +49,7 @@ pub struct FilterConfig {
     pub file: Option<PathBuf>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct NotifyConfig {
     #[serde(default = "default_msg_platform_url")]
@@ -58,6 +60,7 @@ pub struct NotifyConfig {
     pub cc: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct HarborConfig {
     #[serde(default)]
@@ -70,6 +73,7 @@ pub struct HarborConfig {
     pub password: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoggingConfig {
     #[serde(default = "default_log_level")]

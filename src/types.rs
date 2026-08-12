@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 /// A GitLab push event from the Events API.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Event {
     pub id: u64,
@@ -19,6 +20,7 @@ pub struct Event {
 }
 
 /// Push-specific data within an event.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct PushData {
     #[serde(default)]
@@ -36,6 +38,7 @@ pub struct PushData {
 }
 
 /// GitLab user/author info.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Author {
     #[serde(default)]
@@ -47,6 +50,7 @@ pub struct Author {
 }
 
 /// GitLab project summary.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Project {
     #[serde(default)]
@@ -58,6 +62,7 @@ pub struct Project {
 }
 
 /// A commit from the Commits API.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Commit {
     #[serde(default)]
@@ -79,6 +84,7 @@ pub struct Commit {
 }
 
 /// User info from the Users API.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct GitLabUser {
     #[serde(default)]
@@ -94,6 +100,7 @@ pub struct GitLabUser {
 }
 
 /// A high-level push event, normalized from Event API data.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct PushEvent {
     pub event_id: u64,

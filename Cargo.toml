@@ -19,6 +19,8 @@ dotenvy = "0.15"
 anyhow = "1"
 thiserror = "2"
 url = "2"
+tokio-util = "0.7.19"
+dashmap = "6.2.1"
 
 [dev-dependencies]
 wiremock = "0.6"

@@ -29,6 +29,7 @@ pub struct DeploymentRecord {
 }
 
 /// Deployment statistics for a project.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct DeployStats {
     pub total: u64,
@@ -144,6 +145,7 @@ impl DeploymentDb {
     }
 
     /// Fetch the most recent N deployments for a project.
+    #[allow(dead_code)]
     pub async fn recent(&self, project: &str, limit: u32) -> Result<Vec<DeploymentRecord>> {
         let rows = sqlx::query_as::<_, DeploymentRow>(
             r#"
@@ -165,6 +167,7 @@ impl DeploymentDb {
     }
 
     /// Fetch the most recent N deployments for a project + branch.
+    #[allow(dead_code)]
     pub async fn recent_by_branch(
         &self,
         project: &str,
@@ -192,6 +195,7 @@ impl DeploymentDb {
     }
 
     /// Get deployment statistics for a project in the last N days.
+    #[allow(dead_code)]
     pub async fn stats(&self, project: &str, days: u32) -> Result<DeployStats> {
         let total: (i64,) = sqlx::query_as(
             r#"
