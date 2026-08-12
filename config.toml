@@ -1,0 +1,40 @@
+[gitlab]
+url = "http://172.16.29.88:30080"
+# 也可通过 RU_DEPLOYER_GITLAB_TOKEN 环境变量覆盖，避免写入文件
+token = ""
+
+[deploy]
+mode = "multi"
+scripts_dir = "./scripts"
+src_dir = "./src"
+# 脚本执行超时（秒）
+script_timeout_secs = 1800
+# 单项目模式专用 (events / commits)
+# project = "dev-team/api"
+# commits 模式专用
+# branch = "main"
+
+[filter]
+file = "./filter.toml"
+
+[notify]
+msg_platform_url = "http://172.16.42.213:8081"
+notify_author = true
+cc = []
+
+[harbor]
+# Harbor registry 认证（传给子进程 push_harbor.sh）
+# 也可通过 HARBOR_PASSWORD 环境变量传入
+registry = "172.16.29.88:30800"
+project = "gpu"
+user = "robot$gpu+gpubot"
+password = ""
+
+[logging]
+level = "info"
+output = "stdout"
+# output = "file" 时需要
+# file = "/var/log/ru_deployer.log"
+
+[database]
+path = "./data/deploy.db"

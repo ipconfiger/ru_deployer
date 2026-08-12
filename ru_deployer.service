@@ -1,0 +1,18 @@
+[Unit]
+Description=ru_deployer - GitLab Push Event Watcher & Deployer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/ru_deployer
+EnvironmentFile=-/opt/ru_deployer/.env
+ExecStart=/opt/ru_deployer/ru_deployer --mode multi --config /opt/ru_deployer/config.toml
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/ru_deployer.log
+StandardError=append:/var/log/ru_deployer.log
+
+[Install]
+WantedBy=multi-user.target

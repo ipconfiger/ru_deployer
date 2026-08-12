@@ -1,0 +1,15 @@
+[[repos]]
+project = "dev-team/api"
+branches = ["main", "mysql_db"]
+
+[[repos]]
+project = "dev-team/flint"
+branches = ["main", "develop"]
+
+[[repos]]
+project = "dev-team/horizon"
+branches = ["feat/multi"]
+
+[[repos]]
+project = "dev-team/api-manager-platform"
+branches = ["feature/bare-metal-rental"]
