@@ -22,6 +22,6 @@ fi
 docker build -t api-manager-platform:latest -f Dockerfile .
 
 # 重启容器
-docker compose up -d api-manager-platform
+docker compose -p ru_deployer -f "${SCRIPT_DIR}/docker-compose.yml" up -d api-manager-platform
 
 echo "[api-manager-platform] done"

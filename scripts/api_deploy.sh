@@ -16,6 +16,6 @@ sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' api_release/Dockerfile
 docker build -t api:latest -f api_release/Dockerfile api_release/
 
 # 重启容器
-docker compose up -d api
+docker compose -p ru_deployer -f "${SCRIPT_DIR}/docker-compose.yml" up -d api
 
 echo "[api] done"

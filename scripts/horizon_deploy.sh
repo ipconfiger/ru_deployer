@@ -23,6 +23,6 @@ docker build -t horizon:latest -f Dockerfile \
     .
 
 # 重启容器
-docker compose up -d horizon
+docker compose -p ru_deployer -f "${SCRIPT_DIR}/docker-compose.yml" up -d horizon
 
 echo "[horizon] done"

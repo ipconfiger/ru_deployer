@@ -139,12 +139,15 @@ services:
       FLINT_LOG_LEVEL: "info"
       FLINT_LOG_FORMAT: "json"
       RUST_LOG: "info"
+    volumes:
+      - flint_data:/var/lib/flint
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "grpc-health-check", "localhost:50051"]
+      test: ["CMD", "curl", "-f", "http://localhost:9091/health"]
       interval: 15s
       timeout: 5s
       retries: 3
+      start_period: 60s
 
   # --- Horizon（Node/Nitro 前端, 端口 3000） ---
   horizon:
@@ -208,3 +211,4 @@ volumes:
   redis_data:
   rabbitmq_data:
   postgres_data:
+  flint_data:

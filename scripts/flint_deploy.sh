@@ -17,6 +17,6 @@ sed -i 's|FROM debian:bookworm-slim|FROM ubuntu:24.04|g' flint/Dockerfile
 docker build -t flint:latest -f flint/Dockerfile flint/
 
 # 重启容器
-docker compose up -d flint
+docker compose -p ru_deployer -f "${SCRIPT_DIR}/docker-compose.yml" up -d flint
 
 echo "[flint] done"
