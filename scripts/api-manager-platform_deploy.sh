@@ -21,7 +21,7 @@ fi
 # 编译 Docker 镜像
 docker build -t api-manager-platform:latest -f Dockerfile .
 
-# 重启容器 (部署到测试机时取消注释)
-# docker compose up -d api-manager-platform
+# 重启容器
+docker compose up -d api-manager-platform
 
 echo "[api-manager-platform] done"
