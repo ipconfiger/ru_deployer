@@ -245,12 +245,12 @@ fn spawn_deploy(
     let key_for_outer = key.clone();
     let key_inner = key_for_outer.clone();
     let handle = tokio::spawn(async move {
-        let (result, author_id, event_type, project_name, branch_or_tag) = if let Some(ref pe) = push {
+        let (result, author_id, event_type, project_name, branch_or_tag, gitlab_event_id) = if let Some(ref pe) = push {
             let result = deployer.deploy(pe, &gitlab_url, &gitlab_token, token_clone).await;
-            (result, pe.author_id, "push".to_string(), pe.project.clone(), pe.branch.clone())
+            (result, pe.author_id, "push".to_string(), pe.project.clone(), pe.branch.clone(), pe.event_id)
         } else if let Some(ref re) = release {
             let result = deployer.release(re, &gitlab_url, &gitlab_token, token_clone).await;
-            (result, re.author_id, "release".to_string(), re.project.clone(), re.tag_name.clone())
+            (result, re.author_id, "release".to_string(), re.project.clone(), re.tag_name.clone(), re.event_id)
         } else {
             return;
         };
@@ -267,7 +267,7 @@ fn spawn_deploy(
             commit_sha: String::new(),
             author_name: String::new(),
             author_email: String::new(),
-            event_id: 0,
+            event_id: gitlab_event_id,
             event_type,
             exit_code: result.exit_code,
             status: if result.exit_code == 0 { "success".into() } else { "failed".into() },
