@@ -19,6 +19,7 @@ use tracing::{error, info, warn};
 struct ProjectState {
     encoded_path: String,
     last_event_id: Option<u64>,
+    last_release_tag: Option<String>,
     short_name: String,
 }
 
@@ -67,6 +68,7 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
             ProjectState {
                 encoded_path: project.replace('/', "%2F"),
                 last_event_id: last_id,
+                last_release_tag: None,
                 short_name: project.rsplit('/').next().unwrap_or(project).to_string(),
             },
         );
@@ -103,6 +105,13 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                         if let Some(id) = new_last_id {
                             info!("{} initial event ID: {}", short_name, id);
                             state.get_mut(project).unwrap().last_event_id = Some(id);
+                        }
+                        // Also record release baseline
+                        if let Ok(releases) = client.get_releases(&encoded_path, 1).await {
+                            if let Some(r) = releases.first() {
+                                info!("{} initial release tag: {}", short_name, r.tag_name);
+                                state.get_mut(project).unwrap().last_release_tag = Some(r.tag_name.clone());
+                            }
                         }
                         continue;
                     }
@@ -145,26 +154,6 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                                 &cfg.notify.cc,
                             );
                         }
-                        // --- Release event ---
-                        else if latest.target_type.as_deref() == Some("Release") {
-                            let release_event = match ReleaseEvent::from_event(latest, project) {
-                                Some(re) => re,
-                                None => { warn!("Failed to parse release event for {}", project); continue; }
-                            };
-
-                            info!("Release detected: {} tag={}", release_event.project, release_event.tag_name);
-
-                            let deploy_key = format!("{}:release:{}", release_event.project, release_event.tag_name);
-                            spawn_deploy(
-                                deploy_key, None, Some(release_event),
-                                &deployer, &client, &notifier, &db,
-                                &cfg.gitlab.url, &cfg.gitlab.token,
-                                cfg.notify.notify_author,
-                                &active,
-                                &filter,
-                                &cfg.notify.cc,
-                            );
-                        }
                     }
 
                     // Update last_event_id
@@ -174,6 +163,36 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     error!("{} API request failed: {}", short_name, e);
+                }
+            }
+
+            // === Check for new releases (subsequent polls) ===
+            if !first_poll {
+                if let Ok(releases) = client.get_releases(&encoded_path, 1).await {
+                    if let Some(r) = releases.first() {
+                        let current_tag = state.get(project).and_then(|s| s.last_release_tag.clone());
+                        if current_tag.as_deref() != Some(&r.tag_name) {
+                            info!("Release detected: {} tag={}", project, r.tag_name);
+                            let release_event = ReleaseEvent {
+                                project: project.clone(),
+                                tag_name: r.tag_name.clone(),
+                                author_name: r.author.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+                                author_id: r.author.as_ref().map(|a| a.id).unwrap_or(0),
+                                event_id: 0,
+                            };
+                            let deploy_key = format!("{}:release:{}", project, r.tag_name);
+                            spawn_deploy(
+                                deploy_key, None, Some(release_event),
+                                &deployer, &client, &notifier, &db,
+                                &cfg.gitlab.url, &cfg.gitlab.token,
+                                cfg.notify.notify_author,
+                                &active,
+                                &filter,
+                                &cfg.notify.cc,
+                            );
+                            state.get_mut(project).unwrap().last_release_tag = Some(r.tag_name.clone());
+                        }
+                    }
                 }
             }
 

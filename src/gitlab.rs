@@ -1,6 +1,6 @@
 //! GitLab REST API client for polling push events and user info.
 
-use crate::types::{Commit, Event, GitLabUser};
+use crate::types::{Commit, Event, GitLabRelease, GitLabUser};
 use anyhow::{Context, Result};
 use reqwest::Client;
 use tracing::{debug, warn};
@@ -234,5 +234,32 @@ impl GitLabClient {
         } else {
             user.public_email
         })
+    }
+
+    // === Releases API ===
+
+    /// Fetch latest releases for a project.
+    pub async fn get_releases(&self, project_path: &str, per_page: u32) -> Result<Vec<GitLabRelease>> {
+        let url = format!("{}/api/v4/projects/{}/releases", self.base_url, project_path);
+        debug!("GET {} (releases)", url);
+
+        let resp = self
+            .client
+            .get(&url)
+            .headers(self.headers())
+            .query(&[("per_page", &per_page.to_string())])
+            .send()
+            .await
+            .with_context(|| format!("Failed to fetch releases for project: {}", project_path))?;
+
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+            anyhow::bail!("Authentication failed — check GITLAB_TOKEN");
+        }
+        resp.error_for_status_ref()?;
+
+        let releases: Vec<GitLabRelease> = resp.json().await
+            .context("Failed to parse releases JSON")?;
+        debug!("Got {} releases for project {}", releases.len(), project_path);
+        Ok(releases)
     }
 }

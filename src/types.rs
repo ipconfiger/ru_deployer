@@ -170,3 +170,27 @@ impl ReleaseEvent {
         })
     }
 }
+
+/// A GitLab release from the Releases API.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct GitLabRelease {
+    pub tag_name: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub author: Option<Author>,
+    #[serde(default)]
+    pub commit: Option<ReleaseCommit>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReleaseCommit {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub short_id: String,
+}
