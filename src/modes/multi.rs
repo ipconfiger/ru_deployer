@@ -50,7 +50,7 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
     let mut state: HashMap<String, ProjectState> = HashMap::new();
     let projects: Vec<String> = filter.project_paths().map(String::from).collect();
 
-    // Startup validation
+    // Startup validation + restore last_event_id from DB
     for project in &projects {
         let exists = client.project_exists(project).await;
         if exists {
@@ -58,11 +58,15 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
         } else {
             warn!("Filter project NOT found or inaccessible: {} (will still monitor)", project);
         }
+        let last_id = db.get_last_event_id(project).await.unwrap_or(None);
+        if let Some(id) = last_id {
+            info!("{} restored last event ID from DB: {}", project, id);
+        }
         state.insert(
             project.clone(),
             ProjectState {
                 encoded_path: project.replace('/', "%2F"),
-                last_event_id: None,
+                last_event_id: last_id,
                 short_name: project.rsplit('/').next().unwrap_or(project).to_string(),
             },
         );

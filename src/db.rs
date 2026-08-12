@@ -118,6 +118,19 @@ impl DeploymentDb {
         Ok(())
     }
 
+    /// Get the most recent event_id for a project (for startup state restore).
+    pub async fn get_last_event_id(&self, project: &str) -> Result<Option<u64>> {
+        let row: Option<(i64,)> = sqlx::query_as(
+            "SELECT MAX(event_id) FROM deployments WHERE project = ?",
+        )
+        .bind(project)
+        .fetch_optional(&self.pool)
+        .await
+        .context("Failed to query last event ID")?;
+
+        Ok(row.map(|(id,)| id as u64))
+    }
+
     /// Insert a deployment record and return its ID.
     pub async fn insert(&self, record: &DeploymentRecord) -> Result<i64> {
         let result = sqlx::query(
