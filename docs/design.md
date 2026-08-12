@@ -238,7 +238,8 @@ impl GitLabClient {
 **事件轮询策略**（各模式共享）:
 - 维护 `last_event_id`（或 `last_commit_sha`）
 - 每次轮询比较最新记录 ID
-- 变化时触发 `deploy::handle_push`
+- 变化时触发 `deploy::handle_push`（commits 模式除外：仅打印变更信息）
+- 每 30 次轮询打印心跳日志（含当前跟踪的 ID/SHA），便于运维确认服务存活
 
 ### 4.2 `filter.rs` — 过滤器
 
@@ -487,8 +488,8 @@ CREATE TABLE IF NOT EXISTS deployments (
     event_id     INTEGER NOT NULL,    -- GitLab event ID
     exit_code    INTEGER NOT NULL,
     status       TEXT    NOT NULL CHECK (status IN ('success', 'failed')),
-    stdout_tail  TEXT    NOT NULL DEFAULT '',   -- 末尾 10KB
-    stderr_tail  TEXT    NOT NULL DEFAULT '',   -- 末尾 10KB
+    stdout_tail  TEXT    NOT NULL DEFAULT '',   -- 头 2KB + 尾 8KB
+    stderr_tail  TEXT    NOT NULL DEFAULT '',   -- 头 2KB + 尾 8KB
     duration_ms  INTEGER NOT NULL,
     created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
 );
@@ -514,9 +515,9 @@ ru_deployer
 
 # 指定模式
 ru_deployer --mode multi
-ru_deployer --mode events
+ru_deployer --mode events --project dev-team/api
 ru_deployer --mode global
-ru_deployer --mode commits --branch main
+ru_deployer --mode commits --project dev-team/api --branch main
 
 # 指定配置文件
 ru_deployer --config /etc/ru_deployer/config.toml
@@ -573,7 +574,7 @@ docker build -t "${IMAGE_NAME}" -f "<Dockerfile相对路径>" .
 "${SCRIPT_DIR}/push_harbor.sh" "${IMAGE_NAME}" "gpu_${PROJECT_NAME}_dev" "${ACTUAL_COMMIT}"
 
 # restart
-cd "${SCRIPT_DIR}/.." && docker compose up -d "${PROJECT_NAME}"
+cd "${SCRIPT_DIR}" && docker compose up -d "${PROJECT_NAME}"
 
 echo "部署完成 (commit: ${ACTUAL_COMMIT})"
 ```
@@ -600,7 +601,8 @@ echo "部署完成 (commit: ${ACTUAL_COMMIT})"
 | `toml` | TOML 配置解析 |
 | `clap` | CLI 参数解析 |
 | `tracing` / `tracing-subscriber` | 结构化日志 |
-| `dashmap` | 并发安全的部署锁 |
+| `tokio::sync::Mutex` | 并发安全的部署锁（std 内置，无需额外 crate） |
+| `dotenvy` | `.env` 文件加载 |
 | `sqlx` (feature: `sqlite`, `runtime-tokio`) | SQLite 数据库操作 |
 | `chrono` | 时间处理 |
 | `anyhow` / `thiserror` | 错误处理 |
