@@ -94,6 +94,7 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                     let new_last_id = events.first().map(|e| e.id);
 
                     // Traverse ALL events (not just first) to avoid missing push/release
+                    // But on first poll (last_id=None), only process the latest to avoid storm
                     for latest in &events {
                         let event_id = latest.id;
 
@@ -101,6 +102,11 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                         if let Some(last) = last_id {
                             if event_id <= last {
                                 break;
+                            }
+                        } else {
+                            // First poll: only process the very first (latest) event
+                            if event_id != events.first().unwrap().id {
+                                continue;
                             }
                         }
 
@@ -266,9 +272,9 @@ fn spawn_deploy(
             duration_ms: result.duration.as_millis() as i64,
         };
 
-        if let Err(e) = db.insert(&record).await {
-            error!("Failed to record deployment: {}", e);
-        }
+                        if let Err(e) = db.insert(&record).await {
+                            error!("Failed to record deployment: {:?}", e);
+                        }
 
         if notify_author {
             let mut email = client.get_user_email(author_id).await.unwrap_or_default();

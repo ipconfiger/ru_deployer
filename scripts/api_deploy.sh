@@ -11,7 +11,7 @@ echo "[api] commit=${COMMIT}"
 sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' api_release/Dockerfile
 docker build -t api:latest -f api_release/Dockerfile api_release/
 
-# 重启容器
-docker compose up -d api
+# 重启容器 (部署到测试机时取消注释)
+# docker compose up -d api
 
 echo "[api] done"

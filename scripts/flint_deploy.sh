@@ -12,7 +12,7 @@ sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' flint/Dockerfile
 sed -i 's|FROM debian:bookworm-slim|FROM ubuntu:24.04|g' flint/Dockerfile
 docker build -t flint:latest -f flint/Dockerfile flint/
 
-# 重启容器
-docker compose up -d flint
+# 重启容器 (部署到测试机时取消注释)
+# docker compose up -d flint
 
 echo "[flint] done"

@@ -18,7 +18,7 @@ docker build -t horizon:latest -f Dockerfile \
     --build-arg VITE_PLAYGROUND_API_ENDPOINT="http://172.16.42.36:3001/v1" \
     .
 
-# 重启容器
-docker compose up -d horizon
+# 重启容器 (部署到测试机时取消注释)
+# docker compose up -d horizon
 
 echo "[horizon] done"
