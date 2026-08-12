@@ -2,10 +2,14 @@
 # api-manager-platform_deploy.sh — 部署 dev-team/api-manager-platform (Go + 前端)
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT="api-manager-platform"
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${GIT_BRANCH}"
+
 cd "${SRC_DIR}"
 COMMIT=$(git rev-parse --short HEAD)
-
-echo "[api-manager-platform] commit=${COMMIT}"
+echo "[api-manager-platform] branch=${GIT_BRANCH} commit=${COMMIT}"
 
 # 编译前端 (如果有)
 FRONTEND_DIR="$(find . -maxdepth 2 -name "package.json" -not -path "*/node_modules/*" | head -1 | xargs dirname 2>/dev/null || echo "")"

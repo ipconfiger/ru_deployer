@@ -1,9 +1,11 @@
 #!/bin/bash
 # api_release.sh — Release 构建 dev-team/api
-# 环境变量: SRC_DIR, VERSION, HARBOR_PASSWORD, SCRIPTS_DIR
 set -e
 
-SCRIPT_DIR="${SCRIPTS_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT="api"
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${VERSION}"
 
 cd "${SRC_DIR}"
 echo "[api_release] version=${VERSION}"

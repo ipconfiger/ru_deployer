@@ -2,10 +2,14 @@
 # horizon_deploy.sh — 部署 dev-team/horizon (Node/Nitro 前端)
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT="horizon"
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${GIT_BRANCH}"
+
 cd "${SRC_DIR}"
 COMMIT=$(git rev-parse --short HEAD)
-
-echo "[horizon] commit=${COMMIT}"
+echo "[horizon] branch=${GIT_BRANCH} commit=${COMMIT}"
 
 # 编译 Docker 镜像
 docker build -t horizon:latest -f Dockerfile \

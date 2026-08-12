@@ -83,11 +83,10 @@ impl Deployer {
         );
 
         let script_name = format!("{}_deploy.sh", event.project.rsplit('/').next().unwrap_or(&event.project));
-        self.do_run(&event.project, &event.branch, &event.commit, &event.author_name, event.event_id, &script_name, gitlab_host, gitlab_token, cancel_token, false).await
+        self.do_run(&event.project, &event.branch, &script_name, gitlab_host, gitlab_token, cancel_token, false).await
     }
 
-    /// Execute a release build. If `cancel_token` fires, the running child
-    /// process is killed and the deployment returns with `cancelled: true`.
+    /// Execute a release build.
     pub async fn release(
         &self,
         event: &ReleaseEvent,
@@ -101,7 +100,7 @@ impl Deployer {
         );
 
         let script_name = format!("{}_release.sh", event.project.rsplit('/').next().unwrap_or(&event.project));
-        self.do_run(&event.project, &event.tag_name, &event.tag_name, &event.author_name, event.event_id, &script_name, gitlab_host, gitlab_token, cancel_token, true).await
+        self.do_run(&event.project, &event.tag_name, &script_name, gitlab_host, gitlab_token, cancel_token, true).await
     }
 
     /// Shared implementation for deploy and release.
@@ -110,14 +109,11 @@ impl Deployer {
         &self,
         project: &str,
         ref_name: &str,
-        commit_ref: &str,
-        author_name: &str,
-        event_id: u64,
         script_filename: &str,
         gitlab_host: &str,
         gitlab_token: &str,
         cancel_token: CancellationToken,
-        is_tag: bool,  // true = release (pull by tag), false = deploy (pull by branch)
+        is_tag: bool,
     ) -> DeployResult {
         let start = Instant::now();
 
@@ -148,7 +144,7 @@ impl Deployer {
 
         let commit = self.git.current_commit(&repo_path).await.unwrap_or_default();
         // Make repo_path absolute so the script can cd to it regardless of current_dir
-        let repo_path = repo_path.canonicalize().unwrap_or(repo_path);
+        let _repo_path = repo_path.canonicalize().unwrap_or(repo_path);
 
         // 2. Find deploy script
         let script_name = script_filename.to_string();
@@ -169,7 +165,7 @@ impl Deployer {
         // 3. Execute script with cancellation + timeout
         info!("Executing deploy script: {}", script_path.display());
         let result = self
-            .run_script(&script_path, project, ref_name, commit_ref, author_name, event_id, &repo_path, cancel_token)
+            .run_script(&script_path, ref_name, cancel_token)
             .await;
 
         let (exit_code, stdout_raw, stderr_raw) = match result {
@@ -237,26 +233,14 @@ impl Deployer {
     async fn run_script(
         &self,
         script_path: &std::path::Path,
-        project: &str,
         ref_name: &str,
-        commit_ref: &str,
-        author_name: &str,
-        event_id: u64,
-        repo_path: &std::path::Path,
         cancel_token: CancellationToken,
     ) -> ScriptResult {
         let script_abs = script_path.canonicalize().unwrap_or_else(|_| script_path.to_path_buf());
-        let scripts_abs = self.scripts_dir.canonicalize().unwrap_or_else(|_| self.scripts_dir.clone());
         let mut child = match Command::new("bash")
             .arg(&script_abs)
-            .env("GITLAB_PROJECT", project)
-            .env("GITLAB_BRANCH", ref_name)
-            .env("GITLAB_COMMIT", commit_ref)
-            .env("GITLAB_AUTHOR", author_name)
-            .env("GITLAB_EVENT_ID", event_id.to_string())
+            .env("GIT_BRANCH", ref_name)
             .env("VERSION", ref_name)
-            .env("SRC_DIR", &repo_path)
-            .env("SCRIPTS_DIR", &scripts_abs)
             .env("HARBOR_PASSWORD", &self.harbor_password)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
