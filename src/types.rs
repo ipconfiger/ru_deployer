@@ -145,6 +145,11 @@ impl PushEvent {
 }
 
 /// A high-level release event, normalized from Event API data when target_type=Release.
+///
+/// NOTE: since commit bf8332b release detection uses the Releases API directly
+/// (see `modes/multi.rs`), so `from_event` was removed as dead code. `event_id`
+/// is always 0 because the Releases API has no event ID (see F5 in the tech
+/// debt plan); `author_id` is populated from `GitLabRelease.author.id`.
 #[derive(Debug, Clone)]
 pub struct ReleaseEvent {
     pub project: String,
@@ -152,23 +157,6 @@ pub struct ReleaseEvent {
     pub author_name: String,
     pub author_id: u64,
     pub event_id: u64,
-}
-
-impl ReleaseEvent {
-    pub fn from_event(event: &Event, project_name: &str) -> Option<Self> {
-        let tag_name = event.target_title.as_deref()?;
-        Some(Self {
-            project: project_name.to_string(),
-            tag_name: tag_name.to_string(),
-            author_name: event
-                .author
-                .as_ref()
-                .map(|a| a.name.clone())
-                .unwrap_or_else(|| "unknown".into()),
-            author_id: event.author_id,
-            event_id: event.id,
-        })
-    }
 }
 
 /// A GitLab release from the Releases API.

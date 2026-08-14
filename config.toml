@@ -26,8 +26,8 @@ notify_author = true
 cc = []
 
 [harbor]
-# Harbor registry 认证（传给子进程 push_harbor.sh）
-# 也可通过 HARBOR_PASSWORD 环境变量传入
+# Harbor registry 认证（Rust 统一注入子进程 push_harbor.sh，含 registry/project/user/password 四个变量）
+# 也可通过 RU_DEPLOYER_HARBOR_* 环境变量覆盖；HARBOR_PASSWORD 环境变量作为 password 的兜底来源
 registry = "172.16.29.88:30800"
 project = "gpu"
 user = "robot$gpu+gpubot"

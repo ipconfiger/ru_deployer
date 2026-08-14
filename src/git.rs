@@ -121,9 +121,19 @@ impl GitRepo {
 
         if target_dir.join(".git").exists() {
             debug!("Repository exists at {}, fetching tags", target_dir.display());
-            // Fetch tags with unshallow to handle shallow clones
+            // F1: only pass --unshallow when the repo is actually shallow;
+            // `git fetch --unshallow` on a complete repo exits 128 and would
+            // fail the release build.
+            let shallow_out = Command::new("git")
+                .args(["rev-parse", "--is-shallow-repository"])
+                .current_dir(&target_dir)
+                .output()
+                .await
+                .context("Failed to check shallow repository status")?;
+            let is_shallow = String::from_utf8_lossy(&shallow_out.stdout).trim() == "true";
+
             let output = Command::new("git")
-                .args(["fetch", "--tags", "--unshallow", "origin"])
+                .args(fetch_tags_args(is_shallow))
                 .current_dir(&target_dir)
                 .output()
                 .await
@@ -251,9 +261,43 @@ impl GitRepo {
     }
 }
 
+/// Build `git fetch --tags` args, adding `--unshallow` only for shallow repos
+/// (F1: `--unshallow` on a complete repository exits 128).
+fn fetch_tags_args(is_shallow: bool) -> Vec<&'static str> {
+    let mut args = vec!["fetch", "--tags"];
+    if is_shallow {
+        args.push("--unshallow");
+    }
+    args.push("origin");
+    args
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command as StdCommand;
+
+    /// Run a git command in `dir`, asserting success; returns the Output so
+    /// callers can inspect stdout (e.g. `rev-parse --is-shallow-repository`).
+    fn run_git(dir: &Path, args: &[&str]) -> std::process::Output {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("failed to run git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed:\nstdout: {}\nstderr: {}",
+            args,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out
+    }
+
+    fn git_stdout(dir: &Path, args: &[&str]) -> String {
+        String::from_utf8_lossy(&run_git(dir, args).stdout).trim().to_string()
+    }
 
     #[test]
     fn test_branch_traversal_rejected() {
@@ -275,5 +319,81 @@ mod tests {
         assert_eq!("api", "dev-team/api".rsplit('/').next().unwrap());
         assert_eq!("project", "project".rsplit('/').next().unwrap());
         assert_eq!("sub", "group/sub".rsplit('/').next().unwrap());
+    }
+
+    #[test]
+    fn test_fetch_tags_args() {
+        assert_eq!(
+            fetch_tags_args(true),
+            vec!["fetch", "--tags", "--unshallow", "origin"]
+        );
+        assert_eq!(fetch_tags_args(false), vec!["fetch", "--tags", "origin"]);
+    }
+
+    /// Real-repo integration test for the F1 command sequences:
+    /// shallow repo → `--unshallow` succeeds; complete repo → the guarded
+    /// (no `--unshallow`) fetch succeeds, while a raw `--unshallow` would fail
+    /// (which is exactly why ensure_tag guards it).
+    #[test]
+    fn test_fetch_tags_shallow_vs_complete() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote");
+        std::fs::create_dir_all(&remote).unwrap();
+        run_git(&remote, &["init", "-q", "-b", "main"]);
+        run_git(&remote, &["config", "user.email", "t@t"]);
+        run_git(&remote, &["config", "user.name", "t"]);
+        std::fs::write(remote.join("f"), "a").unwrap();
+        run_git(&remote, &["add", "f"]);
+        run_git(&remote, &["commit", "-qm", "a"]);
+        std::fs::write(remote.join("f"), "b").unwrap();
+        run_git(&remote, &["commit", "-qam", "b"]);
+        run_git(&remote, &["tag", "v1"]);
+
+        // Shallow clone via file:// (forces --depth semantics)
+        let shallow = dir.path().join("shallow");
+        run_git(
+            dir.path(),
+            &[
+                "clone", "-q", "--depth", "1", "--branch", "v1",
+                &format!("file://{}", remote.display()),
+                &shallow.display().to_string(),
+            ],
+        );
+        assert_eq!(
+            git_stdout(&shallow, &["rev-parse", "--is-shallow-repository"]),
+            "true"
+        );
+
+        // Complete clone
+        let full = dir.path().join("full");
+        run_git(
+            dir.path(),
+            &[
+                "clone", "-q",
+                &format!("file://{}", remote.display()),
+                &full.display().to_string(),
+            ],
+        );
+        assert_eq!(
+            git_stdout(&full, &["rev-parse", "--is-shallow-repository"]),
+            "false"
+        );
+
+        // F1-fixed behavior: shallow → unshallow succeeds
+        run_git(&shallow, &["fetch", "--tags", "--unshallow", "origin"]);
+
+        // F1-fixed behavior: complete repo → guarded fetch (no --unshallow) succeeds
+        run_git(&full, &["fetch", "--tags", "origin"]);
+
+        // Motivation: raw --unshallow on complete repo fails (exit 128)
+        let out = StdCommand::new("git")
+            .args(["fetch", "--tags", "--unshallow", "origin"])
+            .current_dir(&full)
+            .output()
+            .expect("failed to run git");
+        assert!(
+            !out.status.success(),
+            "unshallow on complete repo must fail — that's why ensure_tag guards it"
+        );
     }
 }

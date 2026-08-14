@@ -62,7 +62,7 @@ pub async fn run(cfg: &Config, service: &str, branch_override: Option<&str>) -> 
         cfg.deploy.src_dir.clone(),
         cfg.deploy.scripts_dir.clone(),
         cfg.deploy.script_timeout_secs,
-        cfg.harbor.password.clone(),
+        cfg.harbor.clone(),
     );
 
     let cancel = CancellationToken::new();

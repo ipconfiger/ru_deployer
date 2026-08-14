@@ -3,6 +3,7 @@
 //! Supports cancellation: when a new push arrives for the same project+branch,
 //! the running deployment is cancelled and its child process killed.
 
+use crate::config::HarborConfig;
 use crate::git::GitRepo;
 use crate::types::{PushEvent, ReleaseEvent};
 use std::path::PathBuf;
@@ -50,7 +51,9 @@ pub struct Deployer {
     git: GitRepo,
     scripts_dir: PathBuf,
     script_timeout: Duration,
-    harbor_password: String,
+    /// Full Harbor config (registry/project/user/password), injected into
+    /// child scripts as HARBOR_* env vars (T1: config-driven, no hardcoding).
+    harbor: HarborConfig,
 }
 
 impl Deployer {
@@ -58,13 +61,13 @@ impl Deployer {
         src_dir: PathBuf,
         scripts_dir: PathBuf,
         script_timeout_secs: u64,
-        harbor_password: String,
+        harbor: HarborConfig,
     ) -> Self {
         Self {
             git: GitRepo::new(src_dir),
             scripts_dir,
             script_timeout: Duration::from_secs(script_timeout_secs),
-            harbor_password,
+            harbor,
         }
     }
 
@@ -241,7 +244,10 @@ impl Deployer {
             .arg(&script_abs)
             .env("GIT_BRANCH", ref_name)
             .env("VERSION", ref_name)
-            .env("HARBOR_PASSWORD", &self.harbor_password)
+            .env("HARBOR_REGISTRY", &self.harbor.registry)
+            .env("HARBOR_PROJECT", &self.harbor.project)
+            .env("HARBOR_USER", &self.harbor.user)
+            .env("HARBOR_PASSWORD", &self.harbor.password)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()

@@ -17,3 +17,15 @@
 
 - **测试环境，不要求强密码**：`FLINT_ADMIN_TOKEN=flint-admin-change-me` 等 dev 占位值 / 弱密码可接受，**不要再反复报告弱密码 / 敏感信息暴露类安全问题**。
 - compose 操作统一用 `docker compose -p ru_deployer`（项目名为 `ru_deployer`，非目录名 `scripts`）。
+
+## 日志轮转（T4）
+
+`ru_deployer` 以 systemd append 模式写 `/var/log/ru_deployer.log`，无限增长。配置文件位于仓库 `docs/logrotate-ru_deployer.conf`，目标机安装：
+
+```bash
+cp docs/logrotate-ru_deployer.conf /etc/logrotate.d/ru_deployer
+logrotate -d /etc/logrotate.d/ru_deployer   # 先 dry-run 验证
+```
+
+- 必须用 `copytruncate`（systemd 持有 fd，create 无效）；会丢失轮转瞬间的少量日志，可接受。
+- 按天轮转，保留 14 份并压缩；`logrotate` 通常由 cron/systemd-timer 每日触发，无需额外配置。

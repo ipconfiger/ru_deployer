@@ -195,7 +195,22 @@ pub fn load(config_path: &Path) -> Result<Config> {
     if let Ok(v) = std::env::var("RU_DEPLOYER_NOTIFY_MSG_PLATFORM_URL") {
         config.notify.msg_platform_url = v;
     }
+    // Harbor: RU_DEPLOYER_HARBOR_* 优先；plain HARBOR_PASSWORD 兜底
+    // （config.toml / docs/design.md 声明 plain HARBOR_PASSWORD 可用；
+    //  原依赖 push_harbor.sh 写死密码兜底，T1 删除兜底后必须在此读取，
+    //  否则 .env/EnvironmentFile 中的 HARBOR_PASSWORD 会静默失效）
+    if let Ok(v) = std::env::var("RU_DEPLOYER_HARBOR_REGISTRY") {
+        config.harbor.registry = v;
+    }
+    if let Ok(v) = std::env::var("RU_DEPLOYER_HARBOR_PROJECT") {
+        config.harbor.project = v;
+    }
+    if let Ok(v) = std::env::var("RU_DEPLOYER_HARBOR_USER") {
+        config.harbor.user = v;
+    }
     if let Ok(v) = std::env::var("RU_DEPLOYER_HARBOR_PASSWORD") {
+        config.harbor.password = v;
+    } else if let Ok(v) = std::env::var("HARBOR_PASSWORD") {
         config.harbor.password = v;
     }
 
@@ -305,5 +320,64 @@ release_prefix = "gpu-"
         assert_eq!(config.deploy.release_prefix, None);
 
         std::env::remove_var("RU_DEPLOYER_DEPLOY_RELEASE_PREFIX");
+    }
+
+    #[test]
+    fn test_harbor_env_override() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("RU_DEPLOYER_GITLAB_TOKEN");
+        std::env::remove_var("RU_DEPLOYER_HARBOR_REGISTRY");
+        std::env::remove_var("RU_DEPLOYER_HARBOR_PROJECT");
+        std::env::remove_var("RU_DEPLOYER_HARBOR_USER");
+        std::env::remove_var("RU_DEPLOYER_HARBOR_PASSWORD");
+        std::env::remove_var("HARBOR_PASSWORD");
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let toml_content = r#"
+[gitlab]
+token = "test-token"
+
+[deploy]
+
+[filter]
+
+[notify]
+
+[harbor]
+registry = "reg.example.com:5000"
+project = "proj"
+user = "robot$proj+bot"
+password = ""
+"#;
+        std::fs::write(&config_path, toml_content).unwrap();
+
+        // RU_DEPLOYER_HARBOR_* 优先于 plain HARBOR_PASSWORD
+        std::env::set_var("RU_DEPLOYER_HARBOR_REGISTRY", "env-reg:5000");
+        std::env::set_var("RU_DEPLOYER_HARBOR_PROJECT", "env-proj");
+        std::env::set_var("RU_DEPLOYER_HARBOR_USER", "env-user");
+        std::env::set_var("RU_DEPLOYER_HARBOR_PASSWORD", "env-pass");
+        std::env::set_var("HARBOR_PASSWORD", "plain-pass");
+        let config = load(&config_path).unwrap();
+        assert_eq!(config.harbor.registry, "env-reg:5000");
+        assert_eq!(config.harbor.project, "env-proj");
+        assert_eq!(config.harbor.user, "env-user");
+        assert_eq!(config.harbor.password, "env-pass");
+
+        // 无 RU_DEPLOYER_ 前缀时 plain HARBOR_PASSWORD 兜底
+        std::env::remove_var("RU_DEPLOYER_HARBOR_PASSWORD");
+        let config = load(&config_path).unwrap();
+        assert_eq!(config.harbor.password, "plain-pass");
+
+        // 全部清空则回落到 TOML 文件值
+        std::env::remove_var("RU_DEPLOYER_HARBOR_REGISTRY");
+        std::env::remove_var("RU_DEPLOYER_HARBOR_PROJECT");
+        std::env::remove_var("RU_DEPLOYER_HARBOR_USER");
+        std::env::remove_var("HARBOR_PASSWORD");
+        let config = load(&config_path).unwrap();
+        assert_eq!(config.harbor.registry, "reg.example.com:5000");
+        assert_eq!(config.harbor.project, "proj");
+        assert_eq!(config.harbor.user, "robot$proj+bot");
+        assert_eq!(config.harbor.password, "");
     }
 }

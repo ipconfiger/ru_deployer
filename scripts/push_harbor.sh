@@ -4,21 +4,21 @@
 # 用法: push_harbor.sh <source_image> <harbor_image_name> <version>
 # 示例: push_harbor.sh "api:latest" "gpu_api_dev" "abc1234"
 #
-# 环境变量（可选覆盖写死默认值）:
+# 环境变量（由 ru_deployer 统一注入；手动执行时也可设置）:
 #   HARBOR_REGISTRY   (默认 172.16.29.88:30800)
 #   HARBOR_PROJECT    (默认 gpu)
 #   HARBOR_USER       (默认 robot$gpu+gpubot)
-#   HARBOR_PASSWORD   (写死, 非空不会跳过)
+#   HARBOR_PASSWORD   (无默认值; 为空则静默跳过推送)
 #
 # 退出码: 0 = 成功/跳过, 非 0 = 参数错误
 
 set -euo pipefail
 
-# === 配置（可用环境变量覆盖）===
+# === 配置（可用环境变量覆盖；密码无默认，避免凭据进入仓库）===
 HARBOR_REGISTRY="${HARBOR_REGISTRY:-172.16.29.88:30800}"
 HARBOR_PROJECT="${HARBOR_PROJECT:-gpu}"
 HARBOR_USER="${HARBOR_USER:-robot\$gpu+gpubot}"
-HARBOR_PASSWORD="${HARBOR_PASSWORD:-dymkCrB8g7mpgEJXJPJsdTIfZWMsec9v}"
+HARBOR_PASSWORD="${HARBOR_PASSWORD:-}"
 
 SOURCE_IMAGE="$1"
 HARBOR_IMAGE_NAME="$2"

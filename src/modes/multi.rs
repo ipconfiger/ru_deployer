@@ -60,7 +60,7 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
         cfg.deploy.src_dir.clone(),
         cfg.deploy.scripts_dir.clone(),
         cfg.deploy.script_timeout_secs,
-        cfg.harbor.password.clone(),
+        cfg.harbor.clone(),
     ));
     let notifier = Arc::new(Notifier::new(cfg.notify.msg_platform_url.clone())?);
     let db = Arc::new(DeploymentDb::open(&cfg.database.path).await?);
