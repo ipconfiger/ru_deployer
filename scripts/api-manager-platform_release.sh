@@ -1,15 +1,14 @@
 #!/bin/bash
-# api-manager-platform_deploy.sh — 部署 dev-team/api-manager-platform (Go + 前端)
+# api-manager-platform_release.sh — Release 构建 dev-team/api-manager-platform (Go + 前端)
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
 PROJECT="api-manager-platform"
-SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${GIT_BRANCH}"
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${VERSION}"
 
 cd "${SRC_DIR}"
-COMMIT=$(git rev-parse --short HEAD)
-echo "[api-manager-platform] branch=${GIT_BRANCH} commit=${COMMIT}"
+echo "[api-manager-platform_release] version=${VERSION}"
 
 # 编译前端
 if [ -f "frontend/package.json" ]; then
@@ -21,9 +20,9 @@ fi
 CGO_ENABLED=0 go build -ldflags="-s -w" -o server ./cmd/server
 
 # 编译 Docker 镜像（Dockerfile.local：本地先编译再打包）
-docker build -t api-manager-platform:latest -f Dockerfile.local .
+docker build -t "gpu_api-manager-platform:${VERSION}" -t "gpu_api-manager-platform:latest" -f Dockerfile.local .
 
-# 重启容器
-docker compose -p ru_deployer -f "${SCRIPT_DIR}/docker-compose.yml" up -d api-manager-platform
+# 推送到 Harbor
+"${SCRIPT_DIR}/push_harbor.sh" "gpu_api-manager-platform:${VERSION}" "gpu_api-manager-platform" "${VERSION}"
 
-echo "[api-manager-platform] done"
+echo "[api-manager-platform_release] done"

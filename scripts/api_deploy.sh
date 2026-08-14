@@ -12,8 +12,8 @@ COMMIT=$(git rev-parse --short HEAD)
 echo "[api] branch=${GIT_BRANCH} commit=${COMMIT}"
 
 # 编译 Docker 镜像
-sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' api_release/Dockerfile
-docker build -t api:latest -f api_release/Dockerfile api_release/
+sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' api_release/Dockerfile.test
+docker build -t api:latest -f api_release/Dockerfile.test api_release/
 
 # 重启容器
 docker compose -p ru_deployer -f "${SCRIPT_DIR}/docker-compose.yml" up -d api
