@@ -203,6 +203,25 @@ impl Notifier {
     }
 }
 
+/// Merge notification recipients (F4).
+///
+/// Author email takes priority; when missing, fall back to the union of
+/// repo-level emails and global cc emails, deduplicated and sorted.
+/// Returns a comma-joined string (empty when no recipients — caller should
+/// skip sending in that case).
+pub fn merge_recipients(author_email: &str, repo_emails: &[String], cc_emails: &[String]) -> String {
+    let mut recipients: Vec<String> = Vec::new();
+    if !author_email.is_empty() {
+        recipients.push(author_email.to_string());
+    } else {
+        recipients.extend(repo_emails.iter().cloned());
+        recipients.extend(cc_emails.iter().cloned());
+    }
+    recipients.sort();
+    recipients.dedup();
+    recipients.join(",")
+}
+
 /// Minimal HTML entity escaping.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -221,5 +240,28 @@ mod tests {
         assert_eq!(html_escape("a & b"), "a &amp; b");
         assert_eq!(html_escape(r#""quoted""#), "&quot;quoted&quot;");
         assert_eq!(html_escape("normal"), "normal");
+    }
+
+    #[test]
+    fn test_merge_recipients() {
+        // author email 存在 → 仅 author
+        assert_eq!(
+            merge_recipients("a@x.com", &["r@x.com".into()], &["c@x.com".into()]),
+            "a@x.com"
+        );
+        // author 缺失 → repo ∪ cc（排序）
+        assert_eq!(
+            merge_recipients("", &["r@x.com".into()], &["c@x.com".into()]),
+            "c@x.com,r@x.com"
+        );
+        // 去重
+        assert_eq!(
+            merge_recipients("", &["dup@x.com".into(), "dup@x.com".into()], &["dup@x.com".into()]),
+            "dup@x.com"
+        );
+        // 全部为空 → 空串
+        assert_eq!(merge_recipients("", &[], &[]), "");
+        // 无 cc 时 repo 兜底
+        assert_eq!(merge_recipients("", &["r@x.com".into()], &[]), "r@x.com");
     }
 }

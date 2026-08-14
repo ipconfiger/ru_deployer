@@ -1,5 +1,7 @@
 # Release 事件支持 — 设计文档
 
+> **实现现状（2026-08-13 更新）**：自提交 bf8332b 起，release 检测**改用 Releases API 轮询**（`get_releases`），不再走 §2.2/§2.3 描述的 Events API 事件遍历方案；新增 `release_prefix` 配置（config `[deploy].release_prefix`）支持多实例共享仓库时按 tag 前缀过滤。§2.2/§2.3 的内容保留作为历史设计参考。§2.5 之后（git/deploy/notify/db 改动）与当前实现一致（T1 起 `HARBOR_*` 4 项全量注入）。
+
 ## 1. 需求
 
 检测 GitLab Release 事件，触发对应的 release 构建流程。
@@ -168,7 +170,7 @@ impl Deployer {
 与 `deploy()` 的区别：
 - 调用 `git.ensure_tag()` 而非 `git.ensure()`
 - 执行 `<project>_release.sh` 而非 `<project>_deploy.sh`
-- 额外传入 `VERSION` 环境变量（**注意：`HARBOR_PASSWORD` 同样需要传入**，`Deployer` 结构体已持有该字段，直接复用）
+- 注入的环境变量：`GIT_BRANCH`/`VERSION`（均取 tag 名）+ `HARBOR_REGISTRY`/`HARBOR_PROJECT`/`HARBOR_USER`/`HARBOR_PASSWORD`（T1 起 `Deployer` 持有 `HarborConfig` 全量注入；密码为空时 `push_harbor.sh` 静默跳过）
 - `event_type` 由 multi.rs 在创建 `DeploymentRecord` 时设置为 `"release"`（不在 `DeployResult` 中传递）
 
 ### 2.6 notify.rs 改动 — 新增 notify_release
@@ -238,19 +240,22 @@ pub async fn recent_releases(&self, project: &str, limit: u32) -> Result<Vec<Dep
 ```bash
 #!/bin/bash
 # api_release.sh — Release 构建 dev-team/api
-# 环境变量: SRC_DIR, VERSION, HARBOR_PASSWORD, SCRIPTS_DIR
+# Rust 注入: GIT_BRANCH/VERSION（tag 名）+ HARBOR_REGISTRY/PROJECT/USER/PASSWORD
 set -e
 
-SCRIPT_DIR="${SCRIPTS_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT="api"
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${VERSION}"
 
 cd "${SRC_DIR}"
 echo "[api_release] version=${VERSION}"
 
-# 编译镜像
-sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' api_release/Dockerfile
-docker build -t "gpu_api:${VERSION}" -f api_release/Dockerfile api_release/
+# 编译镜像（version + latest 双 tag）
+sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' api_release/Dockerfile.test
+docker build -t "gpu_api:${VERSION}" -t "gpu_api:latest" -f api_release/Dockerfile.test api_release/
 
-# 推送到 Harbor（复用 push_harbor.sh，优雅跳过无密码场景）
+# 推送到 Harbor（复用 push_harbor.sh，认证经 HARBOR_* 环境变量；无密码时静默跳过）
 "${SCRIPT_DIR}/push_harbor.sh" "gpu_api:${VERSION}" "gpu_api" "${VERSION}"
 
 echo "[api_release] done"

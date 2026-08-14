@@ -39,17 +39,35 @@ pub async fn watch_events(cfg: &Config) -> anyhow::Result<()> {
     let poll_interval = std::time::Duration::from_secs(cfg.gitlab.poll_interval_secs);
 
     loop {
-        match client.get_project_events(&encoded, 5).await {
+        // F3: per_page raised from 5 to 10; iterate ALL returned events (not
+        // just the first) so multiple pushes between polls are not missed.
+        match client.get_project_events(&encoded, 10).await {
             Ok(events) => {
-                if let Some(latest) = events.first() {
-                    let event_id = latest.id;
-                    if last_event_id.is_none() {
-                        last_event_id = Some(event_id);
-                        info!("Initial event ID: {}", event_id);
-                    } else if event_id != last_event_id.unwrap() {
-                        last_event_id = Some(event_id);
+                let new_last_id = events.first().map(|e| e.id);
 
-                        let branch = latest.push_data.as_ref()
+                if last_event_id.is_none() {
+                    // First poll: baseline only, never process events
+                    if let Some(id) = new_last_id {
+                        last_event_id = Some(id);
+                        info!("Initial event ID: {}", id);
+                    }
+                } else {
+                    // Subsequent polls: process new events, skipping already-seen
+                    // IDs (<= last + break guards against GitLab ID rollback/ordering)
+                    for event in &events {
+                        let event_id = event.id;
+                        if event_id <= last_event_id.unwrap_or(0) {
+                            break;
+                        }
+
+                        // This mode is push-only (release is multi-only);
+                        // the action=pushed filter means push_data should be set,
+                        // but guard defensively anyway.
+                        if event.push_data.is_none() {
+                            continue;
+                        }
+
+                        let branch = event.push_data.as_ref()
                             .map(|pd| pd.r#ref.as_str())
                             .unwrap_or("");
 
@@ -57,7 +75,7 @@ pub async fn watch_events(cfg: &Config) -> anyhow::Result<()> {
                             continue;
                         }
 
-                        let push_event = match PushEvent::from_event(latest, Some(project)) {
+                        let push_event = match PushEvent::from_event(event, Some(project)) {
                             Some(pe) => pe,
                             None => {
                                 warn!("Failed to parse push event");
@@ -118,15 +136,19 @@ pub async fn watch_events(cfg: &Config) -> anyhow::Result<()> {
                             let _ = db.insert(&record).await;
 
                             if notify_author {
-                                let mut email = client.get_user_email(push_event.author_id).await.unwrap_or_default();
-                                if email.is_empty() && !repo_emails.is_empty() {
-                                    email = repo_emails.join(",");
-                                } else if email.is_empty() && !cc_emails.is_empty() {
-                                    email = cc_emails.join(",");
-                                }
+                                // F4: author email 优先；缺失时兜底 repo_emails ∪ cc（合并去重）
+                                let email = crate::notify::merge_recipients(
+                                    &client.get_user_email(push_event.author_id).await.unwrap_or_default(),
+                                    &repo_emails,
+                                    &cc_emails,
+                                );
                                 notifier.notify(&push_event, &result, &email).await;
                             }
                         });
+                    }
+
+                    if let Some(id) = new_last_id {
+                        last_event_id = Some(id);
                     }
                 }
             }

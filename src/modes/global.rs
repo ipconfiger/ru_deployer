@@ -39,25 +39,41 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
     let poll_interval = std::time::Duration::from_secs(cfg.gitlab.poll_interval_secs);
 
     loop {
+        // F3: iterate ALL returned events (not just the first) so multiple
+        // pushes between polls are not missed.
         match client.get_global_events(10).await {
             Ok(events) => {
-                if let Some(latest) = events.first() {
-                    let event_id = latest.id;
-                    if last_event_id.is_none() {
-                        last_event_id = Some(event_id);
-                        info!("Initial event ID: {}", event_id);
-                    } else if event_id != last_event_id.unwrap() {
-                        last_event_id = Some(event_id);
+                let new_last_id = events.first().map(|e| e.id);
 
-                        let project_path = match client.lookup_project(latest.project_id).await {
+                if last_event_id.is_none() {
+                    // First poll: baseline only, never process events
+                    if let Some(id) = new_last_id {
+                        last_event_id = Some(id);
+                        info!("Initial event ID: {}", id);
+                    }
+                } else {
+                    // Subsequent polls: process new events, skipping already-seen
+                    // IDs (<= last + break guards against GitLab ID rollback/ordering)
+                    for event in &events {
+                        let event_id = event.id;
+                        if event_id <= last_event_id.unwrap_or(0) {
+                            break;
+                        }
+
+                        // Push-only (release is multi-only); guard defensively.
+                        if event.push_data.is_none() {
+                            continue;
+                        }
+
+                        let project_path = match client.lookup_project(event.project_id).await {
                             Ok(Some(p)) => p,
                             _ => {
-                                warn!("Could not lookup project ID {}", latest.project_id);
+                                warn!("Could not lookup project ID {}", event.project_id);
                                 continue;
                             }
                         };
 
-                        let branch = latest.push_data.as_ref()
+                        let branch = event.push_data.as_ref()
                             .map(|pd| pd.r#ref.as_str())
                             .unwrap_or("");
 
@@ -65,7 +81,7 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
                             continue;
                         }
 
-                        let push_event = match PushEvent::from_event(latest, Some(&project_path)) {
+                        let push_event = match PushEvent::from_event(event, Some(&project_path)) {
                             Some(pe) => pe,
                             None => {
                                 warn!("Failed to parse push event for {}", project_path);
@@ -113,7 +129,7 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
                                 author_name: push_event.author_name.clone(),
                                 author_email: String::new(),
                                 event_id: push_event.event_id,
-                            event_type: "push".into(),
+                                event_type: "push".into(),
                                 exit_code: result.exit_code,
                                 status: if result.exit_code == 0 { "success".into() } else { "failed".into() },
                                 stdout_tail: result.stdout.clone(),
@@ -123,16 +139,20 @@ pub async fn watch_global(cfg: &Config) -> anyhow::Result<()> {
 
                             let _ = db.insert(&record).await;
 
-                        if notify_author {
-                            let mut email = client.get_user_email(push_event.author_id).await.unwrap_or_default();
-                            if email.is_empty() && !repo_emails.is_empty() {
-                                email = repo_emails.join(",");
-                            } else if email.is_empty() && !cc_emails.is_empty() {
-                                email = cc_emails.join(",");
+                            if notify_author {
+                                // F4: author email 优先；缺失时兜底 repo_emails ∪ cc（合并去重）
+                                let email = crate::notify::merge_recipients(
+                                    &client.get_user_email(push_event.author_id).await.unwrap_or_default(),
+                                    &repo_emails,
+                                    &cc_emails,
+                                );
+                                notifier.notify(&push_event, &result, &email).await;
                             }
-                            notifier.notify(&push_event, &result, &email).await;
-                        }
                         });
+                    }
+
+                    if let Some(id) = new_last_id {
+                        last_event_id = Some(id);
                     }
                 }
             }

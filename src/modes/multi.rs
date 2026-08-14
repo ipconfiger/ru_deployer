@@ -129,6 +129,7 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                             tag_name: r.tag_name.clone(),
                             author_name: r.author.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
                             author_id: r.author.as_ref().map(|a| a.id).unwrap_or(0),
+                            // F5: Releases API 无事件 ID，恒为 0（不影响 MAX(event_id) 恢复）
                             event_id: 0,
                         };
                         let deploy_key = format!("{}:release:{}", project, r.tag_name);
@@ -319,12 +320,13 @@ fn spawn_deploy(
                         }
 
         if notify_author {
-            let mut email = client.get_user_email(author_id).await.unwrap_or_default();
-            if email.is_empty() && !repo_emails.is_empty() {
-                email = repo_emails.join(",");
-            } else if email.is_empty() && !cc_emails.is_empty() {
-                email = cc_emails.join(",");
-            }
+            // F4: author email 优先；缺失时兜底 repo_emails ∪ cc（合并去重，
+            // 不再二选一 —— cc 收件人将每次都收到通知，属预期行为变更）
+            let email = crate::notify::merge_recipients(
+                &client.get_user_email(author_id).await.unwrap_or_default(),
+                &repo_emails,
+                &cc_emails,
+            );
             if let Some(ref pe) = push {
                 notifier.notify(pe, &result, &email).await;
             } else if let Some(ref re) = release {

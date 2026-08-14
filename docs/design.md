@@ -355,35 +355,37 @@ impl Deployer {
 }
 ```
 
-**脚本执行环境变量**（与 Python 版兼容，全部由 Rust 注入子进程）：
+**脚本执行环境变量**（自提交 349918e 极简化 + T1 全量注入，Rust 注入以下变量）：
 
-| 变量 | 值 | 来源 |
+| 变量 | 值 | 说明 |
 |---|---|---|
-| `GITLAB_PROJECT` | `dev-team/api` | push event |
-| `GITLAB_BRANCH` | `main` (不含 `refs/heads/` 前缀) | push event |
-| `GITLAB_COMMIT` | 完整 SHA | push event |
-| `GITLAB_AUTHOR` | 提交者用户名 | push event |
-| `GITLAB_EVENT_ID` | 事件 ID | push event |
-| `SRC_DIR` | `src/api/main/` | Rust git 拉取后的绝对路径 |
-| `HARBOR_PASSWORD` | Harbor 密码 | `config.toml` `[harbor].password` 或环境变量 |
-| `SCRIPTS_DIR` | 脚本目录绝对路径 | `config.toml` `[deploy].scripts_dir` |
+| `GIT_BRANCH` | `main` | push 部署的分支名（不含 `refs/heads/` 前缀）；release 时与 `VERSION` 相同 |
+| `VERSION` | `v0.0.70` | release 的 tag 名（push 部署时与 `GIT_BRANCH` 相同） |
+| `HARBOR_REGISTRY` | `172.16.29.88:30800` | `config.toml` `[harbor].registry`（T1 起 4 项全量注入） |
+| `HARBOR_PROJECT` | `gpu` | `[harbor].project` |
+| `HARBOR_USER` | `robot$gpu+gpubot` | `[harbor].user` |
+| `HARBOR_PASSWORD` | Harbor 密码 | `[harbor].password`；为空时 `push_harbor.sh` 静默跳过推送 |
+
+**脚本自行推导代码目录**（Rust 不再注入 `SRC_DIR`）：
+```bash
+ROOT_DIR="$(dirname "$(cd "$(dirname "$0")" && pwd)")"   # scripts/ 的上级
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${GIT_BRANCH}"        # deploy；release 用 ${VERSION}
+```
 
 **超时控制**: 脚本执行通过 `tokio::time::timeout` 包裹，超时值由 `[deploy].script_timeout_secs` 配置（默认 1800 秒）。超时后子进程被 SIGKILL，视为部署失败。
 
-**并发控制**: 同一项目同一分支的部署串行化，避免重复触发。
+**并发控制**（自 39e78f5 起为"方案 B"）：
 
-使用 `tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>` 方案：
-- 外层 Mutex 保护 HashMap 的读写
-- 内层 Arc<Mutex<()>> 是每个项目+分支的独立锁
-- 获取锁后快速释放外层 Mutex，然后在持有内层锁的情况下执行 `.await` 操作
-- 避免了 `std::sync::Mutex` 在 async 上下文中的阻塞问题
+使用 `DashMap<String, ActiveDeploy>` + `CancellationToken`（`tokio_util`）：
+- key 为 `"<project>:<branch>"`（push）或 `"<project>:release:<tag>"`（release），不同 key **完全并行**；
+- 同一 key 再次触发时，**取消旧部署**（`cancel_token.cancel()` → `deploy.rs` 内 kill 子进程组），并替换为新的 ActiveDeploy；
+- 取消的部署返回 `cancelled: true`，不写 DB、不发通知。
 
 ```
-get_or_create_lock("api:main")
-  → lock outer → get/insert inner Mutex → unlock outer
-  → lock inner (serializes this project+branch)
-  → do async work (git, deploy, notify, db)
-  → unlock inner
+spawn_deploy(key, event)
+  → active.remove(key) → 若有旧任务，cancel()
+  → 新任务持 token 执行 (git, deploy, notify, db)
+  → 完成后 active.remove(key)
 ```
 
 ### 4.5 `notify.rs` — 邮件通知
@@ -543,51 +545,77 @@ ru_deployer --filter ./filter.toml
 3. `docker compose up -d` — 编排逻辑，保留
 
 以下功能已移入 Rust：
-- `git fetch/clone` → `git.rs`（Rust 拉代码到 `src/<project>/<branch>/`，通过 `SRC_DIR` 环境变量传给脚本）
+- `git fetch/clone` → `git.rs`（Rust 拉代码到 `src/<short_name>/<branch|tag>/`，脚本经 `GIT_BRANCH`/`VERSION` 自行推导 `SRC_DIR`）
 
 ### 6.3 新脚本模板
 
+以 `scripts/api_deploy.sh` 为基准（deploy 风格；release 风格见 §6.5）：
+
 ```bash
 #!/bin/bash
+# <project>_deploy.sh — 部署 dev-team/<project>
 set -e
 
-# Rust 传入的环境变量:
-#   GITLAB_PROJECT   e.g. "dev-team/api"
-#   GITLAB_BRANCH    e.g. "main"
-#   GITLAB_COMMIT    完整 SHA
-#   GITLAB_AUTHOR    提交者用户名
-#   SRC_DIR          Rust 已拉好的代码目录 (e.g. /opt/ru_deployer/src/api/main)
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROJECT_NAME="${GITLAB_PROJECT##*/}"
-
-echo "开始部署 ${GITLAB_PROJECT} @ ${GITLAB_BRANCH}"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT="<short_name>"            # e.g. "api"
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${GIT_BRANCH}"
 
 cd "${SRC_DIR}"
-ACTUAL_COMMIT=$(git rev-parse --short HEAD)
+COMMIT=$(git rev-parse --short HEAD)
+echo "[${PROJECT}] branch=${GIT_BRANCH} commit=${COMMIT}"
+
+# 可选: Dockerfile registry 替换（外网 → 内网 Harbor）
+# sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' <dockerfile>
 
 # docker build
-IMAGE_NAME="${PROJECT_NAME}:latest"
-docker build -t "${IMAGE_NAME}" -f "<Dockerfile相对路径>" .
+docker build -t "${PROJECT}:latest" -f <Dockerfile相对路径> <build_context>
 
-# push harbor
-"${SCRIPT_DIR}/push_harbor.sh" "${IMAGE_NAME}" "gpu_${PROJECT_NAME}_dev" "${ACTUAL_COMMIT}"
+# 重启容器（测试机取消注释）
+docker compose -p ru_deployer -f "${SCRIPT_DIR}/docker-compose.yml" up -d "${PROJECT}"
 
-# restart
-cd "${SCRIPT_DIR}" && docker compose up -d "${PROJECT_NAME}"
-
-echo "部署完成 (commit: ${ACTUAL_COMMIT})"
+echo "[${PROJECT}] done"
 ```
 
 ### 6.4 与原脚本的差异
 
 | 项目 | 原脚本 (`tools/`) | 新脚本 (`ru_deployer/scripts/`) |
 |---|---|---|
-| Git 拉取 | 脚本内 `git fetch/clone` | Rust 已完成，通过 `SRC_DIR` 传入 |
-| REPO_DIR | `"${SRC_DIR}/${PROJECT_NAME}"` | 直接使用 `"${SRC_DIR}"` |
+| Git 拉取 | 脚本内 `git fetch/clone` | Rust 已完成，脚本用 `GIT_BRANCH` 推导 `SRC_DIR` |
+| REPO_DIR | `"${SRC_DIR}/${PROJECT_NAME}"` | 直接使用推导出的 `"${SRC_DIR}"` |
 | GitLab 认证 token | 硬编码在脚本中 | 无需（Rust 处理） |
+| 环境变量 | 自行拼 `REPO_DIR` 等 | Rust 注入 `GIT_BRANCH`/`VERSION` + `HARBOR_*` 4 项（T1） |
 | Dockerfile registry 替换 | sed 替换外网地址 | 保留 |
 | docker build / push / up | 保留 | 保留 |
+
+### 6.5 Release 脚本（`<project>_release.sh`）
+
+触发于 release 事件（tag），构建带版本镜像并推 Harbor，**不重启容器**：
+
+```bash
+#!/bin/bash
+# <project>_release.sh — Release 构建 dev-team/<project>
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT="<short_name>"
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${VERSION}"     # release 用 VERSION（tag 名）
+
+cd "${SRC_DIR}"
+echo "[${PROJECT}_release] version=${VERSION}"
+
+# 可选: Dockerfile registry 替换
+# sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' <dockerfile>
+
+# docker build（version + latest 双 tag）
+docker build -t "gpu_${PROJECT}:${VERSION}" -t "gpu_${PROJECT}:latest" -f <Dockerfile相对路径> <build_context>
+
+# 推 Harbor（认证经 HARBOR_* 环境变量；密码为空时静默跳过）
+"${SCRIPT_DIR}/push_harbor.sh" "gpu_${PROJECT}:${VERSION}" "gpu_${PROJECT}" "${VERSION}"
+
+echo "[${PROJECT}_release] done"
+```
 
 ---
 

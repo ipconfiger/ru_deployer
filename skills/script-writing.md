@@ -15,7 +15,7 @@ Before writing scripts, gather this information from the user or the project's r
 | Information | Required for | Example |
 |---|---|---|
 | Project short name | Both | `api`, `flint`, `horizon` |
-| Dockerfile path | Both | `api_release/Dockerfile`, `Dockerfile` (at repo root) |
+| Dockerfile path | Both | `api_release/Dockerfile.test`, `Dockerfile` (at repo root) |
 | Docker build context | Both | `api_release/`, `.` (repo root) |
 | Any `sed` replacements needed | Deploy | `125.67.215.88:30800 → 172.16.29.88:30800` |
 | Build args (`--build-arg`) | Deploy | `VITE_PRODUCT=gpu`, `VITE_API_ENDPOINT=...` |
@@ -25,19 +25,24 @@ Before writing scripts, gather this information from the user or the project's r
 
 ## Environment Variables Available
 
-Scripts receive these env vars from ru_deployer's Rust process:
+Rust injects ONLY these env vars into scripts (T1: config-driven, no hardcoding):
 
 | Variable | Deploy | Release | Value |
 |---|---|---|---|
-| `SRC_DIR` | ✅ | ✅ | Absolute path to cloned code |
-| `GITLAB_PROJECT` | ✅ | ❌ | `"dev-team/api"` |
-| `GITLAB_BRANCH` | ✅ | ❌ | `"main"` |
-| `GITLAB_COMMIT` | ✅ | ❌ | Full SHA |
-| `GITLAB_AUTHOR` | ✅ | ❌ | Username |
-| `GITLAB_EVENT_ID` | ✅ | ❌ | Event ID |
-| `VERSION` | ❌ | ✅ | Release tag name (e.g., `"v0.0.70"`) |
-| `SCRIPTS_DIR` | ✅ | ✅ | Absolute path to scripts directory |
-| `HARBOR_PASSWORD` | ✅ (via push_harbor.sh) | ✅ (via push_harbor.sh) | Harbor password |
+| `GIT_BRANCH` | ✅ | ✅ (same as VERSION) | Branch name (push) / tag name (release), no `refs/heads/` prefix |
+| `VERSION` | ✅ (same as GIT_BRANCH) | ✅ | Release tag name (e.g., `"v0.0.70"`) |
+| `HARBOR_REGISTRY` | ✅ (via push_harbor.sh) | ✅ (via push_harbor.sh) | From `config.toml [harbor].registry` |
+| `HARBOR_PROJECT` | ✅ (via push_harbor.sh) | ✅ (via push_harbor.sh) | From `config.toml [harbor].project` |
+| `HARBOR_USER` | ✅ (via push_harbor.sh) | ✅ (via push_harbor.sh) | From `config.toml [harbor].user` |
+| `HARBOR_PASSWORD` | ✅ (via push_harbor.sh) | ✅ (via push_harbor.sh) | From `[harbor].password` / `RU_DEPLOYER_HARBOR_PASSWORD` / `HARBOR_PASSWORD`; empty → skip push |
+
+> **Important**: Rust does NOT inject `SRC_DIR` / `GITLAB_PROJECT` / `GITLAB_COMMIT` / `SCRIPTS_DIR` anymore (simplified in commit 349918e). Scripts must derive the source directory themselves:
+> ```bash
+> SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+> ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+> PROJECT="<short_name>"
+> SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${GIT_BRANCH}"   # deploy; release 用 ${VERSION}
+> ```
 
 ## Template: `{project}_deploy.sh`
 
@@ -46,13 +51,17 @@ Scripts receive these env vars from ru_deployer's Rust process:
 # {project}_deploy.sh — 部署 dev-team/{project}
 set -e
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT="{project}"
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${GIT_BRANCH}"
+
 cd "${SRC_DIR}"
 COMMIT=$(git rev-parse --short HEAD)
-
-echo "[{project}] commit=${COMMIT}"
+echo "[{project}] branch=${GIT_BRANCH} commit=${COMMIT}"
 
 # Dockerfile registry replacement (if applicable)
-sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' {dockerfile_relative_path}
+# sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' {dockerfile_relative_path}
 
 # Optional: other sed replacements
 # sed -i 's|FROM debian:bookworm-slim|FROM ubuntu:24.04|g' {dockerfile_relative_path}
@@ -64,7 +73,7 @@ sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' {dockerfile_relative_path
 docker build -t {project}:latest -f {dockerfile_relative_path} {build_context}
 
 # Restart container (uncomment when deploying to target server)
-# docker compose up -d {project}
+# docker compose -p ru_deployer -f "${SCRIPT_DIR}/docker-compose.yml" up -d {project}
 
 echo "[{project}] done"
 ```
@@ -79,14 +88,17 @@ docker build -t {project}:latest -f Dockerfile \
     .
 ```
 
-**Pre-build frontend** (e.g., api-manager-platform):
+**Pre-build frontend + Go** (e.g., api-manager-platform):
 ```bash
-# Compile frontend first
-FRONTEND_DIR="$(find . -maxdepth 2 -name "package.json" -not -path "*/node_modules/*" | head -1 | xargs dirname 2>/dev/null || echo "")"
-if [ -n "${FRONTEND_DIR}" ] && [ -f "${FRONTEND_DIR}/package.json" ]; then
-    (cd "${FRONTEND_DIR}" && npm ci --production=false 2>/dev/null || npm install 2>/dev/null || true)
-    (cd "${FRONTEND_DIR}" && npm run build 2>/dev/null || true)
+# Compile frontend first (fixed frontend/ dir)
+if [ -f "frontend/package.json" ]; then
+    (cd frontend && npm ci 2>/dev/null || npm install 2>/dev/null || true)
+    (cd frontend && npm run build 2>/dev/null || true)
 fi
+# Compile Go backend
+CGO_ENABLED=0 go build -ldflags="-s -w" -o server ./cmd/server
+# Dockerfile.local: 本地先编译再打包
+docker build -t {project}:latest -f Dockerfile.local .
 ```
 
 ## Template: `{project}_release.sh`
@@ -94,21 +106,24 @@ fi
 ```bash
 #!/bin/bash
 # {project}_release.sh — Release 构建 dev-team/{project}
-# 环境变量: SRC_DIR, VERSION, HARBOR_PASSWORD, SCRIPTS_DIR
+# Rust 注入: GIT_BRANCH/VERSION（tag 名）+ HARBOR_REGISTRY/PROJECT/USER/PASSWORD
 set -e
 
-SCRIPT_DIR="${SCRIPTS_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT="{project}"
+SRC_DIR="${ROOT_DIR}/src/${PROJECT}/${VERSION}"
 
 cd "${SRC_DIR}"
 echo "[{project}_release] version=${VERSION}"
 
 # Dockerfile registry replacement (if applicable)
-sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' {dockerfile_relative_path}
+# sed -i 's|125\.67\.215\.88:30800|172.16.29.88:30800|g' {dockerfile_relative_path}
 
-# Docker build with version tag
-docker build -t "gpu_{project}:${VERSION}" -f {dockerfile_relative_path} {build_context}
+# Docker build with version + latest tags
+docker build -t "gpu_{project}:${VERSION}" -t "gpu_{project}:latest" -f {dockerfile_relative_path} {build_context}
 
-# Push to Harbor (version tag + latest tag)
+# Push to Harbor (version + latest); 认证经 HARBOR_* 环境变量，无密码时静默跳过
 "${SCRIPT_DIR}/push_harbor.sh" "gpu_{project}:${VERSION}" "gpu_{project}" "${VERSION}"
 
 echo "[{project}_release] done"
@@ -117,15 +132,15 @@ echo "[{project}_release] done"
 ## Key Conventions
 
 1. **Naming**: `<short_name>_deploy.sh` and `<short_name>_release.sh` — Rust code constructs these names from the project path's last segment
-2. **No git operations**: Rust handles clone/fetch/checkout, script just uses `$SRC_DIR`
-3. **No hardcoded tokens**: Harbor auth goes through `push_harbor.sh` which reads `$HARBOR_PASSWORD`
+2. **No git operations**: Rust handles clone/fetch/checkout, script derives `SRC_DIR` from `ROOT_DIR` + `GIT_BRANCH`/`VERSION`
+3. **No hardcoded tokens/passwords**: Harbor auth goes through `push_harbor.sh` which reads `HARBOR_PASSWORD` (no default; empty → skip). Never hardcode credentials in scripts or compose files
 4. **`set -e`**: Always use, exit on first error
 5. **Echo prefix**: Use `[{project}]` or `[{project}_release]` for easy log identification
-6. **docker compose**: Commented out on dev machines; the comment `# 重启容器 (部署到测试机时取消注释)` marks it for uncommenting at deploy time
+6. **docker compose**: Commented out on dev machines; the comment `# 重启容器 (部署到测试机时取消注释)` marks it for uncommenting at deploy time. Always use `docker compose -p ru_deployer -f "${SCRIPT_DIR}/docker-compose.yml" up -d <service>`
 7. **No `push_harbor.sh` in deploy scripts**: Deploy scripts only build and restart; release scripts build, push to Harbor (version + latest), but do NOT restart
-8. **File location**: All scripts go in `scripts/` directory at repo root
-9. **Permissions**: `chmod +x` after creation
-10. **docker-compose.yml**: Must be present in `scripts/` directory; when adding a new project, add its service definition there
+8. **File location**: All scripts go in `scripts/` directory at repo root; `chmod +x` after creation
+9. **docker-compose.yml**: Must be present in `scripts/` directory; when adding a new project, add its service definition there
+10. **`.gitignore`**: When adding a new project, append `src/<short_name>/` to `.gitignore` (git working dirs live under `src/` and must not be tracked)
 
 ## Filter Configuration
 
@@ -135,7 +150,7 @@ After creating scripts, update `filter.toml`:
 [[repos]]
 project = "dev-team/{project}"
 branches = ["main"]        # branches to monitor for deploy
-emails = ["team@do.top"]   # notification fallback
+emails = ["team@do.top"]   # notification fallback (author email missing 时兜底)
 ```
 
 ## Complete Checklist for Adding a New Project
@@ -146,19 +161,20 @@ emails = ["team@do.top"]   # notification fallback
 4. [ ] `chmod +x scripts/{project}_deploy.sh scripts/{project}_release.sh`
 5. [ ] Add service definition to `scripts/docker-compose.yml`
 6. [ ] Add project to `filter.toml` with branches and emails
-7. [ ] Verify: no hardcoded tokens, no git operations, `set -e`, correct Dockerfile paths
-8. [ ] Test: run `cargo run -- --mode multi` and push to the project to verify detection and script execution
+7. [ ] Append `src/{project}/` to `.gitignore`
+8. [ ] Verify: no hardcoded tokens, no git operations, `set -e`, correct Dockerfile paths
+9. [ ] Test: run `cargo run -- --mode multi` and push to the project to verify detection and script execution
 
 ## Examples
 
 ### Simple project (api)
 - Deploy: `scripts/api_deploy.sh` — single Dockerfile, registry sed, compose restart
-- Release: `scripts/api_release.sh` — Dockerfile, push_harbor.sh with version tag
+- Release: `scripts/api_release.sh` — Dockerfile.test, version+latest tags, push_harbor.sh
 
 ### Frontend project (horizon)
 - Deploy: `scripts/horizon_deploy.sh` — Dockerfile with 7 `--build-arg`, no registry replacement
-- No release script (frontend-only project)
+- Release: `scripts/horizon_release.sh` — 同上 + `VITE_APP_VERSION=${VERSION}` build-arg, push_harbor.sh
 
 ### Complex project (api-manager-platform)
-- Deploy: `scripts/api-manager-platform_deploy.sh` — Go binary + npm frontend, then Dockerfile
-- No release script
+- Deploy: `scripts/api-manager-platform_deploy.sh` — npm frontend + Go binary, Dockerfile.local
+- Release: `scripts/api-manager-platform_release.sh` — 同上 + version tags, push_harbor.sh
