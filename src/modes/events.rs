@@ -99,6 +99,8 @@ pub async fn watch_events(cfg: &Config) -> anyhow::Result<()> {
                             }
 
                             let record = DeploymentRecord {
+                                id: 0,                  // DB 自增主键，insert 忽略
+                                created_at: String::new(), // DB 默认 datetime('now')
                                 project: push_event.project.clone(),
                                 branch: push_event.branch.clone(),
                                 commit_sha: push_event.commit.clone(),

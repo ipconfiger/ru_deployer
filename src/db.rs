@@ -15,6 +15,10 @@ pub struct DeploymentDb {
 /// A single deployment record.
 #[derive(Debug, Clone)]
 pub struct DeploymentRecord {
+    /// 自增主键（insert 时填 0，DB 自动生成；查询时返回）
+    pub id: i64,
+    /// ISO-ish "YYYY-MM-DD HH:MM:SS"（insert 时填空，DB 默认 datetime('now')）
+    pub created_at: String,
     pub project: String,
     pub branch: String,
     pub commit_sha: String,
@@ -165,7 +169,7 @@ impl DeploymentDb {
     pub async fn recent(&self, project: &str, limit: u32) -> Result<Vec<DeploymentRecord>> {
         let rows = sqlx::query_as::<_, DeploymentRow>(
             r#"
-            SELECT project, branch, commit_sha, author_name, author_email,
+            SELECT id, created_at, project, branch, commit_sha, author_name, author_email,
                    event_id, event_type, exit_code, status, stdout_tail, stderr_tail, duration_ms
             FROM deployments
             WHERE project = ?
@@ -192,7 +196,7 @@ impl DeploymentDb {
     ) -> Result<Vec<DeploymentRecord>> {
         let rows = sqlx::query_as::<_, DeploymentRow>(
             r#"
-            SELECT project, branch, commit_sha, author_name, author_email,
+            SELECT id, created_at, project, branch, commit_sha, author_name, author_email,
                    event_id, event_type, exit_code, status, stdout_tail, stderr_tail, duration_ms
             FROM deployments
             WHERE project = ? AND branch = ?
@@ -248,6 +252,8 @@ impl DeploymentDb {
 /// Database row type for sqlx::query_as.
 #[derive(Debug, sqlx::FromRow)]
 struct DeploymentRow {
+    id: i64,
+    created_at: String,
     project: String,
     branch: String,
     commit_sha: String,
@@ -265,6 +271,8 @@ struct DeploymentRow {
 impl From<DeploymentRow> for DeploymentRecord {
     fn from(row: DeploymentRow) -> Self {
         Self {
+            id: row.id,
+            created_at: row.created_at,
             project: row.project,
             branch: row.branch,
             commit_sha: row.commit_sha,
@@ -296,6 +304,8 @@ mod tests {
         let db = create_test_db().await;
 
         let record = DeploymentRecord {
+            id: 0,
+            created_at: String::new(),
             project: "dev-team/api".into(),
             branch: "main".into(),
             commit_sha: "abcdef1234567890".into(),
@@ -317,6 +327,9 @@ mod tests {
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].project, "dev-team/api");
         assert_eq!(recent[0].status, "success");
+        // id/created_at 由 DB 生成，查询返回
+        assert!(recent[0].id > 0);
+        assert!(!recent[0].created_at.is_empty());
     }
 
     #[tokio::test]
@@ -324,6 +337,8 @@ mod tests {
         let db = create_test_db().await;
 
         let r1 = DeploymentRecord {
+            id: 0,
+            created_at: String::new(),
             project: "dev-team/api".into(),
             branch: "main".into(),
             commit_sha: "aaa".into(),
@@ -339,6 +354,8 @@ mod tests {
         };
 
         let r2 = DeploymentRecord {
+            id: 0,
+            created_at: String::new(),
             project: "dev-team/api".into(),
             branch: "develop".into(),
             commit_sha: "bbb".into(),
@@ -371,6 +388,8 @@ mod tests {
 
         for i in 0..5 {
             let record = DeploymentRecord {
+                id: 0,
+                created_at: String::new(),
                 project: "dev-team/api".into(),
                 branch: "main".into(),
                 commit_sha: format!("sha{}", i),

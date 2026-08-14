@@ -298,6 +298,8 @@ fn spawn_deploy(
         }
 
         let record = DeploymentRecord {
+            id: 0,                  // DB 自增主键，insert 忽略
+            created_at: String::new(), // DB 默认 datetime('now')
             project: project_name.clone(),
             branch: branch_or_tag.clone(),
             commit_sha,
