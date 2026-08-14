@@ -7,13 +7,32 @@ use crate::deploy::Deployer;
 use crate::filter::Filter;
 use crate::gitlab::GitLabClient;
 use crate::notify::Notifier;
-use crate::types::{PushEvent, ReleaseEvent};
+use crate::types::{GitLabRelease, PushEvent, ReleaseEvent};
 use dashmap::DashMap;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
+
+/// Number of latest releases fetched per poll. Fetching more than one avoids
+/// missing a prefix-matching release that sits behind a non-matching latest
+/// release (multiple deployer instances sharing one repo).
+const RELEASE_POLL_PAGE: u32 = 20;
+
+/// Return the newest release whose tag matches `prefix`.
+/// `releases` is newest-first (GitLab Releases API default order).
+/// `None`/empty prefix → return the first (newest) release, preserving legacy behavior.
+/// `Some(prefix)` → return the first release whose `tag_name` starts with `prefix`.
+fn latest_matching_release<'a>(
+    releases: &'a [GitLabRelease],
+    prefix: Option<&str>,
+) -> Option<&'a GitLabRelease> {
+    match prefix {
+        Some(p) if !p.is_empty() => releases.iter().find(|r| r.tag_name.starts_with(p)),
+        _ => releases.first(),
+    }
+}
 
 /// Per-project polling state.
 struct ProjectState {
@@ -96,6 +115,37 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                 (s.encoded_path.clone(), s.short_name.clone())
             };
 
+            // === Release polling: baseline on first poll, detect new matching releases after ===
+            if let Ok(releases) = client.get_releases(&encoded_path, RELEASE_POLL_PAGE).await {
+                if let Some(r) = latest_matching_release(&releases, cfg.deploy.release_prefix.as_deref()) {
+                    let current_tag = state.get(project).and_then(|s| s.last_release_tag.clone());
+                    if first_poll {
+                        info!("{} initial release tag: {}", short_name, r.tag_name);
+                        state.get_mut(project).unwrap().last_release_tag = Some(r.tag_name.clone());
+                    } else if current_tag.as_deref() != Some(&r.tag_name) {
+                        info!("Release detected: {} tag={}", project, r.tag_name);
+                        let release_event = ReleaseEvent {
+                            project: project.clone(),
+                            tag_name: r.tag_name.clone(),
+                            author_name: r.author.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
+                            author_id: r.author.as_ref().map(|a| a.id).unwrap_or(0),
+                            event_id: 0,
+                        };
+                        let deploy_key = format!("{}:release:{}", project, r.tag_name);
+                        spawn_deploy(
+                            deploy_key, None, Some(release_event),
+                            &deployer, &client, &notifier, &db,
+                            &cfg.gitlab.url, &cfg.gitlab.token,
+                            cfg.notify.notify_author,
+                            &active,
+                            &filter,
+                            &cfg.notify.cc,
+                        );
+                        state.get_mut(project).unwrap().last_release_tag = Some(r.tag_name.clone());
+                    }
+                }
+            }
+
             match client.get_project_events_unfiltered(&encoded_path).await {
                 Ok(events) => {
                     let new_last_id = events.first().map(|e| e.id);
@@ -105,13 +155,6 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                         if let Some(id) = new_last_id {
                             info!("{} initial event ID: {}", short_name, id);
                             state.get_mut(project).unwrap().last_event_id = Some(id);
-                        }
-                        // Also record release baseline
-                        if let Ok(releases) = client.get_releases(&encoded_path, 1).await {
-                            if let Some(r) = releases.first() {
-                                info!("{} initial release tag: {}", short_name, r.tag_name);
-                                state.get_mut(project).unwrap().last_release_tag = Some(r.tag_name.clone());
-                            }
                         }
                         continue;
                     }
@@ -163,36 +206,6 @@ pub async fn watch_multi(cfg: &Config) -> anyhow::Result<()> {
                 }
                 Err(e) => {
                     error!("{} API request failed: {}", short_name, e);
-                }
-            }
-
-            // === Check for new releases (subsequent polls) ===
-            if !first_poll {
-                if let Ok(releases) = client.get_releases(&encoded_path, 1).await {
-                    if let Some(r) = releases.first() {
-                        let current_tag = state.get(project).and_then(|s| s.last_release_tag.clone());
-                        if current_tag.as_deref() != Some(&r.tag_name) {
-                            info!("Release detected: {} tag={}", project, r.tag_name);
-                            let release_event = ReleaseEvent {
-                                project: project.clone(),
-                                tag_name: r.tag_name.clone(),
-                                author_name: r.author.as_ref().map(|a| a.name.clone()).unwrap_or_default(),
-                                author_id: r.author.as_ref().map(|a| a.id).unwrap_or(0),
-                                event_id: 0,
-                            };
-                            let deploy_key = format!("{}:release:{}", project, r.tag_name);
-                            spawn_deploy(
-                                deploy_key, None, Some(release_event),
-                                &deployer, &client, &notifier, &db,
-                                &cfg.gitlab.url, &cfg.gitlab.token,
-                                cfg.notify.notify_author,
-                                &active,
-                                &filter,
-                                &cfg.notify.cc,
-                            );
-                            state.get_mut(project).unwrap().last_release_tag = Some(r.tag_name.clone());
-                        }
-                    }
                 }
             }
 
@@ -321,4 +334,54 @@ fn spawn_deploy(
     });
 
     active.insert(key_for_outer, ActiveDeploy { cancel_token: token, join_handle: handle });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn release(tag: &str) -> GitLabRelease {
+        GitLabRelease {
+            tag_name: tag.to_string(),
+            name: String::new(),
+            created_at: None,
+            author: None,
+            commit: None,
+        }
+    }
+
+    #[test]
+    fn latest_matching_release_no_prefix_returns_first() {
+        let releases = vec![release("gpu-2"), release("gpu-1"), release("app-1")];
+        let r = latest_matching_release(&releases, None);
+        assert_eq!(r.map(|r| r.tag_name.as_str()), Some("gpu-2"));
+    }
+
+    #[test]
+    fn latest_matching_release_empty_prefix_returns_first() {
+        let releases = vec![release("gpu-2"), release("app-1")];
+        let r = latest_matching_release(&releases, Some(""));
+        assert_eq!(r.map(|r| r.tag_name.as_str()), Some("gpu-2"));
+    }
+
+    #[test]
+    fn latest_matching_release_with_matching_prefix() {
+        let releases = vec![release("app-2"), release("gpu-2"), release("gpu-1")];
+        let r = latest_matching_release(&releases, Some("gpu-"));
+        assert_eq!(r.map(|r| r.tag_name.as_str()), Some("gpu-2"));
+    }
+
+    #[test]
+    fn latest_matching_release_no_match_returns_none() {
+        let releases = vec![release("app-2"), release("app-1")];
+        let r = latest_matching_release(&releases, Some("gpu-"));
+        assert_eq!(r.map(|r| r.tag_name.as_str()), None);
+    }
+
+    #[test]
+    fn latest_matching_release_empty_list_returns_none() {
+        let releases: Vec<GitLabRelease> = vec![];
+        assert_eq!(latest_matching_release(&releases, None).is_none(), true);
+        assert_eq!(latest_matching_release(&releases, Some("gpu-")).is_none(), true);
+    }
 }

@@ -7,6 +7,7 @@ mod gitlab;
 mod logging;
 mod modes;
 mod notify;
+mod oneshot;
 mod types;
 
 use clap::Parser;
@@ -32,9 +33,17 @@ struct Args {
     #[arg(long)]
     project: Option<String>,
 
-    /// Branch for commits mode
+    /// Branch for commits mode (or override branch in --once mode)
     #[arg(long)]
     branch: Option<String>,
+
+    /// Run a single deployment once and exit (no polling loop)
+    #[arg(long)]
+    once: bool,
+
+    /// Service name for --once mode (e.g. "api", "horizon", "flint")
+    #[arg(long)]
+    service: Option<String>,
 }
 
 #[tokio::main]
@@ -55,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     if let Some(p) = args.project {
         cfg.deploy.project = Some(p);
     }
+    let cli_branch = args.branch.clone();
     if let Some(b) = args.branch {
         cfg.deploy.branch = Some(b);
     }
@@ -67,6 +77,15 @@ async fn main() -> anyhow::Result<()> {
         cfg.deploy.mode,
         cfg.gitlab.url
     );
+
+    // One-shot mode: deploy a single service once and exit (no polling loop)
+    if args.once {
+        let service = args.service.as_deref().ok_or_else(|| {
+            anyhow::anyhow!("--once requires --service <name> (e.g. api, horizon, flint)")
+        })?;
+        oneshot::run(&cfg, service, cli_branch.as_deref()).await?;
+        return Ok(());
+    }
 
     match cfg.deploy.mode.as_str() {
         "multi" => {

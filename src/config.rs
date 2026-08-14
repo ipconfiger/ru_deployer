@@ -41,6 +41,8 @@ pub struct DeployConfig {
     pub script_timeout_secs: u64,
     pub project: Option<String>,
     pub branch: Option<String>,
+    #[serde(default)]
+    pub release_prefix: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,6 +186,9 @@ pub fn load(config_path: &Path) -> Result<Config> {
     if let Ok(v) = std::env::var("RU_DEPLOYER_DEPLOY_BRANCH") {
         config.deploy.branch = Some(v);
     }
+    if let Ok(v) = std::env::var("RU_DEPLOYER_DEPLOY_RELEASE_PREFIX") {
+        config.deploy.release_prefix = Some(v);
+    }
     if let Ok(v) = std::env::var("RU_DEPLOYER_FILTER_FILE") {
         config.filter.file = Some(PathBuf::from(v));
     }
@@ -192,6 +197,16 @@ pub fn load(config_path: &Path) -> Result<Config> {
     }
     if let Ok(v) = std::env::var("RU_DEPLOYER_HARBOR_PASSWORD") {
         config.harbor.password = v;
+    }
+
+    // Normalize release_prefix: empty/whitespace → None (no filtering)
+    if let Some(p) = config.deploy.release_prefix.as_deref() {
+        let trimmed = p.trim();
+        config.deploy.release_prefix = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        };
     }
 
     Ok(config)
@@ -259,5 +274,36 @@ token = "file-token"
 
         std::env::remove_var("RU_DEPLOYER_GITLAB_TOKEN");
         std::env::remove_var("RU_DEPLOYER_DEPLOY_MODE");
+    }
+
+    #[test]
+    fn test_release_prefix() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("RU_DEPLOYER_GITLAB_TOKEN");
+        std::env::remove_var("RU_DEPLOYER_DEPLOY_RELEASE_PREFIX");
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let toml_content = r#"
+[gitlab]
+token = "test-token"
+
+[deploy]
+release_prefix = "gpu-"
+
+[filter]
+
+[notify]
+"#;
+        std::fs::write(&config_path, toml_content).unwrap();
+        let config = load(&config_path).unwrap();
+        assert_eq!(config.deploy.release_prefix.as_deref(), Some("gpu-"));
+
+        // Env override with pure whitespace should normalize to None (no filtering)
+        std::env::set_var("RU_DEPLOYER_DEPLOY_RELEASE_PREFIX", "  ");
+        let config = load(&config_path).unwrap();
+        assert_eq!(config.deploy.release_prefix, None);
+
+        std::env::remove_var("RU_DEPLOYER_DEPLOY_RELEASE_PREFIX");
     }
 }

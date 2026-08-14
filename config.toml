@@ -9,6 +9,9 @@ scripts_dir = "./scripts"
 src_dir = "./src"
 # 脚本执行超时（秒）
 script_timeout_secs = 1800
+# release 触发过滤：只处理以该前缀开头的 release tag（建议带分隔符，如 "gpu-" 而非 "gpu"），
+# 用于多个 deployer 实例共享同一仓库时区分
+# release_prefix = "gpu-"
 # 单项目模式专用 (events / commits)
 # project = "dev-team/api"
 # commits 模式专用
