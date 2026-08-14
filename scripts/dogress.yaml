@@ -1,0 +1,14 @@
+# Dogress 运行时配置（挂载到容器 /app/dogress.yaml）
+# 参考 dogress 仓库 scripts/dogress-dev.yaml，ClickHouse 凭据与 compose 中 clickhouse 服务一致
+dogress:
+  listen: "0.0.0.0:7000"
+  admin_listen: "127.0.0.1:9090"
+  database: "/app/data/dogress.db"
+  max_retries: 3
+  threads: 4
+  work_stealing: true
+  upstream_keepalive_pool_size: 128
+  backends: []
+  clickhouse_url: "http://clickhouse:8123"
+  clickhouse_user: "sh_admin"
+  clickhouse_password: "sH_9527!"

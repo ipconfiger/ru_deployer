@@ -1,16 +1,21 @@
 [[repos]]
 project = "dev-team/api"
-branches = ["main", "mysql_db"]
+branches = ["mysql_db"]
 emails = ["23826299@qq.com"]
 
 [[repos]]
 project = "dev-team/flint"
-branches = ["main", "develop"]
+branches = ["main"]
 
 [[repos]]
 project = "dev-team/horizon"
-branches = ["feat/multi"]
+branches = ["test/gpu"]
 
 [[repos]]
 project = "dev-team/api-manager-platform"
-branches = ["feature/bare-metal-rental"]
+branches = ["main"]
+emails = ["lj-emilia@qq.com"]
+
+[[repos]]
+project = "dev-team/dogress"
+branches = ["main"]

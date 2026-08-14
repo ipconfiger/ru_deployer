@@ -23,6 +23,7 @@ services:
       MYSQL_DATABASE: sh_admin
     volumes:
       - mysql_data:/var/lib/mysql
+      - ./mysql-init:/docker-entrypoint-initdb.d:ro
     command: --default-authentication-plugin=mysql_native_password
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "sh_admin", "-psH_9527!"]
@@ -61,6 +62,27 @@ services:
       retries: 10
     restart: unless-stopped
 
+  # --- ClickHouse（API token-audit 计费用量存储） ---
+  # 备注（已记录、暂不实现）:
+  #   1. token-audit 服务未加入本 compose —— 消费 clickhouse 用量的独立服务，暂不部署
+  #   2. dogress.token_usage 表未自动初始化 —— 需手动执行 src/api/<tag>/scripts/clickhouse-init.sql
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    networks:
+      - internal
+    environment:
+      CLICKHOUSE_USER: sh_admin
+      CLICKHOUSE_PASSWORD: sH_9527!
+      CLICKHOUSE_DB: dogress
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "-u", "sh_admin", "--password", "sH_9527!", "-q", "SELECT 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
   # --- API（Rust, 端口 3000） ---
   api:
     image: api:latest
@@ -92,7 +114,7 @@ services:
       WEBRIFY_JWT_KEY: "dev-webrify-jwt-secret-at-least-32-bytes!!"
       WEBRIFY_ALLOWED_ORIGINS: "*"
     volumes:
-      - ./src/api/api_release/static_resources.yaml:/app/static_resources.yaml:ro
+      - ../src/api/mysql_db/api_release/static_resources.yaml:/app/static_resources.yaml:ro
     restart: unless-stopped
 
   # --- Flint（Rust gRPC, 端口 50051/9091） ---
@@ -158,32 +180,16 @@ services:
       - "3002:3000"
     environment:
       NODE_ENV: "production"
+      # Server-side session encryption key (>= 32 chars)
       SESSION_SECRET: "94b6c3b0b76544ff7995c5f8109fd241ea24e50e5904e5ac9c524ac0b9d52182"
-      VITE_PRODUCT: "gpu"
-      VITE_HORIZON_API_ENDPOINT: "http://api:3000"
-      VITE_HORIZON_MANAGER_API_ENDPOINT: "http://api-manager-platform:8080"
-      VITE_WEBRIFY_TURNSTILE_ENDPOINT: "https://webrify.do.top"
-      VITE_HORIZON_CMS_API_ENDPOINT: "http://172.16.42.32:8080"
-      VITE_API_ENDPOINT: "https://api.do.top/v1"
-      VITE_PLAYGROUND_API_ENDPOINT: "http://172.16.42.36:3001/v1"
-      VITE_LOG_LEVEL: "info"
-    restart: unless-stopped
-
-  postgres:
-    image: postgres:16-alpine
-    networks:
-      - internal
-    environment:
-      POSTGRES_USER: sh_admin
-      POSTGRES_PASSWORD: sH_9527!
-      POSTGRES_DB: api_platform
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sh_admin -d api_platform"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+      # Log level: debug | info | warn | error (default: info)
+      LOG_LEVEL: "info"
+      # ---- Backend microservices (runtime) ----
+      HORIZON_API_ENDPOINT: "http://api:3000"
+      HORIZON_MANAGER_API_ENDPOINT: "http://api-manager-platform:8080"
+      HORIZON_CHAT_API_ENDPOINT: "https://api.do.top/v1"
+      HORIZON_CMS_API_ENDPOINT: "http://172.16.42.32:8080"
+      PLAYGROUND_API_ENDPOINT: "http://172.16.42.36:3001/v1"
     restart: unless-stopped
 
   # --- API Manager Platform（Go 后端 + 前端, 端口 8080） ---
@@ -194,13 +200,63 @@ services:
     ports:
       - "8080:8080"
     depends_on:
-      postgres:
+      mysql:
         condition: service_healthy
     environment:
+      # ── Server ──
       SERVER_PORT: "8080"
       SERVER_FRONTEND_DIR: "/var/www/frontend"
       SERVER_ALLOWED_ORIGINS: "*"
       JWT_SECRET: "${JWT_SECRET:-change-me-in-production}"
+
+      # ── Shared DB（用户账户 / Token 批次 / 交易流水 / 钱包，与 api 共享 sh_admin 库） ──
+      SHARED_DB_HOST: "mysql"
+      SHARED_DB_PORT: "3306"
+      SHARED_DB_USER: "sh_admin"
+      SHARED_DB_PASSWORD: "sH_9527!"
+      SHARED_DB_NAME: "sh_admin"
+      SHARED_DB_AUTO_MIGRATE: "true"
+
+      # ── Platform DB（管理端表：产品 / 模型 / 裸金属 / 定价 / 活动） ──
+      PLATFORM_DB_HOST: "mysql"
+      PLATFORM_DB_PORT: "3306"
+      PLATFORM_DB_USER: "sh_admin"
+      PLATFORM_DB_PASSWORD: "sH_9527!"
+      PLATFORM_DB_NAME: "platform_admin"
+      PLATFORM_DB_AUTO_MIGRATE: "true"
+
+      # ── Flint（裸金属 GPU 管理） ──
+      FLINT_GRPC_ADDR: "flint:50051"
+      FLINT_REQUEST_TIMEOUT: "10s"
+      FLINT_RECONCILE_INTERVAL: "5m"
+
+      # ── Dogress（API 网关） ──
+      DOGRESS_ADMIN_URL: "${DOGRESS_ADMIN_URL:-http://dogress:9080}"
+      DOGRESS_USERNAME: "${DOGRESS_USERNAME:-admin}"
+      DOGRESS_PASSWORD: "${DOGRESS_PASSWORD:-dogress2024}"
+      DOGRESS_SYNC_INTERVAL: "${DOGRESS_SYNC_INTERVAL:-5m}"
+      DOGRESS_REQUEST_TIMEOUT: "${DOGRESS_REQUEST_TIMEOUT:-10s}"
+    restart: unless-stopped
+
+  # --- Dogress（Rust Pingora LLM 代理, 端口 7000/9080；admin_listen 仅回环） ---
+  dogress:
+    image: dogress:latest
+    networks:
+      - internal
+    ports:
+      - "7000:7000"
+      - "9080:9080"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    environment:
+      # Admin Web 登录凭据（api-manager-platform 经 DOGRESS_USERNAME/PASSWORD 登录）
+      ADMIN_WEB_USER: "admin"
+      ADMIN_WEB_PASS: "dogress2024"
+      ADMIN_WEB_JWT_SECRET: "change-this-to-a-random-string"
+    volumes:
+      - ./dogress.yaml:/app/dogress.yaml:ro
+      - dogress_data:/app/data
     restart: unless-stopped
 
 # =============================================================================
@@ -210,5 +266,6 @@ volumes:
   mysql_data:
   redis_data:
   rabbitmq_data:
-  postgres_data:
   flint_data:
+  clickhouse_data:
+  dogress_data:
