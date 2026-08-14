@@ -14,7 +14,7 @@
 |---|---|---|---|
 | T1 | `push_harbor.sh` 参数统一 | 低 | release 脚本用 HARBOR_PASSWORD，deploy 脚本用 push_harbor.sh |
 | T2 | DB 历史查询 CLI | 低 | 添加 `--show-recent` 等子命令查看部署历史 |
-| T3 | 回滚功能 | 低 | 基于 SQLite 历史实现回滚 |
+| T3 | ~~回滚功能~~ | **已决策：不实施** | 见 §3.1 T3 决策记录 |
 | T4 | 日志轮转 | 低 | 当前依赖 systemd journal |
 
 此外，本次对源码、脚本、文档的全面 review 发现 **7 项未记录的问题**（F1–F7，见 §3.2），其中 F1 为已实证的代码缺陷，建议与 T1–T4 一并治理。
@@ -65,7 +65,7 @@
 
 ---
 
-#### T2. DB 历史查询 CLI（建议 P1，与 T3 前置相关）
+#### T2. DB 历史查询 CLI（建议 P1）
 
 **问题**：部署历史只能查 SQLite 文件，运维排查不便。
 
@@ -77,35 +77,31 @@
 **要点**：
 - 子命令路径不初始化轮询组件，仅打开 DB；`--config` 仍生效（读 `database.path`）。
 - 现有 `--once` 建议一并迁入 subcommand（`once <service>`），保持 CLI 整洁；此为可选重构。
-- 需要补 `DeploymentRecord` 的 **`id` 与 `created_at`** 两个字段（当前 `db.rs` 的 `DeploymentRow` 未 select 这两列，`DeploymentRecord` 也没有；输出表格与后续回滚按 id 定位都需要它们，见 §5 风险 R2）。
+- 需要补 `DeploymentRecord` 的 **`id` 与 `created_at`** 两个字段（当前 `db.rs` 的 `DeploymentRow` 未 select 这两列，`DeploymentRecord` 也没有；输出表格的 id 列与时间列展示需要它们，见 §5 风险 R2）。
 
 **影响面**：`src/main.rs`（CLI 重构）、`src/db.rs`（补 created_at）。
 **验收**：`cargo run -- history dev-team/api --limit 5` 输出最近 5 条部署；`stats` 输出总数/成功/失败。
 
 ---
 
-#### T3. 回滚功能（建议 P3 暂缓，见阻塞评估 §5）
+#### T3. 回滚功能 — **已决策：不实施**（2026-08-13 业务确认）
 
-**问题**：部署出错时无法一键回退。
+**原问题**：部署出错时无法一键回退。
 
-**方案（代码级回滚，基于 DB 历史）**：
-- CLI：`ru_deployer rollback <project> <branch> --commit <sha>`（或 `--deployment-id <id>` 取 DB 记录中的 commit_sha）。
-- 流程：
-  1. 校验：commit 在 DB 中该项目该分支的历史记录里存在（防误操作）；
-  2. `src/git.rs` 新增 `ensure_commit(host, token, project, branch, commit) -> PathBuf`：
-     - 复用 `ensure()` 先确保分支最新（保证 origin 可达），再 `git fetch --unshallow`（或 `--deepen`）确保旧 commit 可达，然后 **`git reset --hard <commit>`**（⚠ N2：必须用 `reset --hard` 而非 `checkout`——deploy 脚本会 `sed -i` 修改仓库内**已跟踪文件**，`git checkout <commit>` 会因脏工作区拒绝切换，回滚直接失败）；
-  3. **ref_name 仍传 branch，不传 commit sha（N1 修正）**：回滚不改变部署入口，`Deployer.deploy()` 的 `GIT_BRANCH=<branch>` 使脚本推导的 `SRC_DIR` 正确，脚本内 `git rev-parse --short HEAD` 自然显示旧 commit。⚠ 若把 sha 当 ref 传入：`deploy()`→`ensure()` 会执行 `git reset --hard origin/<sha>`（ref 不存在，必失败），且所有脚本用 `${GIT_BRANCH}` 拼 `SRC_DIR`（如 `api_deploy.sh:8`）会 cd 到不存在的 `src/<short>/<sha>`，`set -e` 下立即退出；
-  4. 记录 `DeploymentRecord { event_type: "rollback", branch, commit_sha: <commit>, event_id: 0 }`（`event_id` 列 NOT NULL，填 0 与 release 记录一致，不影响 `MAX(event_id)` 恢复逻辑）；
-  5. 纳入 active 并发锁，**key 必须与同分支的 push 部署共享**（即 `"<project>:<branch>"`，而非独立的 `":rollback"` 后缀）：回滚与同分支部署操作的是**同一个 `src/<short>/<branch>` 目录**，若 key 不同会并行执行 git checkout/reset，互相踩踏。共享 key 后，新 push 到达会取消回滚（反之亦然），语义合理：最终以最新事件为准；
-  6. 通知：复用 push 通知模板，subject 标注"回滚"；
-  7. **连带修复（N2）**：`git.rs` `fetch_and_reset()` 的 `git checkout <branch>` 建议改 `checkout -f`（或先 `reset --hard` 再 checkout），否则回滚后 HEAD 处于 detached 状态且可能残留脏文件，下一次同分支 push 部署的 checkout 会失败、中断部署。
+**决策**：**不在本项目实现回滚功能。**
 
-**关键限制（必须文档化）**：
-- **回滚是临时的**：下次该分支正常 push 部署时，`ensure()` 的 `fetch_and_reset` 会把代码 reset 回 `origin/<branch>` 最新，回滚效果被覆盖。
-- **浅克隆问题**：`src/<short>/<branch>` 是 `--depth 1`，旧 commit 不可达，必须先 unshallow 或 deepen。大仓库 unshallow 耗时与磁盘占用需评估（见 §5 阻塞 B3）。
+**理由**（业务确认）：
+1. 本项目的使用场景是**开发阶段**的自动部署，开发阶段无需回滚；
+2. release 在本项目中**仅负责发布镜像**（构建 + 推 Harbor），不负责容器运行态的管理；
+3. **回滚的工作不由本项目实现**——由项目之外的工作流承担（如目标机器上按版本拉取 Harbor 镜像重新发布，或发布新的 release）。
 
-**影响面**：`src/main.rs`、`src/git.rs`、`src/deploy.rs`、`src/db.rs`、`src/notify.rs`（可选复用）。
-**验收**：`cargo run -- rollback dev-team/api mysql_db --commit <sha>` 后服务运行旧版本；DB 出现 event_type=rollback 记录；随后一次真实 push 恢复最新。
+**影响**：
+- `deployments` 历史表继续留存（审计与排查价值），但不作为回滚数据源使用；
+- 原方案中"回滚按 `--deployment-id` 定位"的需求取消，T2 的 `DeploymentRecord` 补充 `id` 字段仅服务于历史展示；
+- 原 T3 相关的 git 改动（`ensure_commit`、`fetch_and_reset` 改 `checkout -f`、unshallow/deepen 等）**全部取消**；
+- 若将来确实需要代码级回滚，本方案 §3.1 的历史设计要点仍可作参考（已归档于 git 历史与本文档早期版本）。
+
+> 附：原设计要点（归档，不实施）——代码级回滚需新增 `git.rs::ensure_commit`（分支目录内 `reset --hard <commit>`，ref_name 仍传 branch）、回滚记录 `event_type="rollback"`、并发 key 与同分支 push 部署共享；其"临时性"语义（下次 push 自动覆盖）与浅克隆 unshallow 成本是主要限制。
 
 ---
 
@@ -182,11 +178,10 @@
 |---|---|---|---|---|
 | 1 | T1 参数统一 + F1 unshallow 修复 + F6 清理 | S（半天） | 无 | 低：需线上回归一次 release |
 | 2 | T4 日志轮转 | XS（1 小时，运维） | 无 | 低：copytruncate 会丢轮转瞬间的少量日志，可接受 |
-| 3 | T2 历史查询 CLI（含 F2 文档更新） | M（1–2 天） | T1 无依赖 | 中：CLI 重构影响 `--once`，需回归 |
+| 3 | T2 历史查询 CLI（含 F2 文档更新） | M（1–2 天） | 无 | 中：CLI 重构影响 `--once`，需回归 |
 | 4 | F3/F4/F5 小修复 + F2 文档更新 | S–M（1 天） | 无 | 低 |
-| 5 | T3 回滚功能 | L（3–5 天） | T2（查询前置） | 高：见 §5 阻塞 B3 |
 
-> 建议：1–4 合并为一个迭代发布；T3 单独评估后决定是否实施。
+> 建议：1–4 合并为一个迭代发布。~~T3 回滚~~ 已确认不实施（§3.1 T3 决策记录）。
 
 ---
 
@@ -194,31 +189,25 @@
 
 ### 5.1 阻塞问题（Blockers）
 
-| ID | 项 | 级别 | 说明 |
-|---|---|---|---|
-| B1 | T3 回滚的"临时性"语义 | **设计阻塞** | 回滚会被下一次同分支 push 部署自动覆盖（`ensure()` 强制 reset 到 origin 最新）。若团队期望"回滚后保持旧版本直到显式恢复"，现有架构不支持，需引入冻结标志/分支锁，属架构级改动。**建议降级为 P3 暂缓，或明确定义"临时回滚"预期**。 |
-| B2 | T3 回滚依赖 T2 查询可用 | 流程阻塞（可控） | 回滚入口依赖"查历史 → 选 commit"链路；T2 未完成前回滚 UX 不完整。按 §4 顺序先做 T2 即可解除。 |
-| B3 | T3 浅克隆 unshallow 成本 | **实施风险（大仓库时可能变阻塞）** | `src/<short>/<branch>` 为 `--depth 1`，回滚到任意旧 commit 需 unshallow 全量历史。若 api 等仓库历史较大（含镜像、二进制），首次 unshallow 的耗时与磁盘占用不可控。⚠ 已实测（N6）：unshallow 后仓库虽为完整克隆，但**下一次 `git fetch --depth 1` 会把仓库重新标记为浅（`is-shallow-repository` 变回 true，旧 commit 重新不可达，仅对象残留在磁盘）**——所以"回滚→再次正常部署"后如需再次回滚，仍要走 unshallow。**缓解**：改用 `git fetch --deepen N` 按需加深（仅对浅仓库有效，不保证命中任意旧 commit），或**仅支持"回滚到最近一次成功部署的 commit"（推荐默认，限制深度）**。 |
+**无阻塞问题。** 原 T3 相关的 B1/B2/B3（回滚"临时性"语义、依赖 T2 查询、浅克隆 unshallow 成本）随 T3 **确认不实施**（§3.1）而全部消解，不再构成阻塞。
 
 ### 5.2 风险（Risks）
 
 | ID | 项 | 级别 | 说明 |
 |---|---|---|---|
 | R1 | CLI 重构回归 | 中 | `main.rs` 扁平参数改 subcommand 后，systemd `ExecStart` 与现有 `--mode/--config` 用法需同步验证；`ru_deployer.service` 当前用 `--mode multi --config …`，重构须保持兼容或同步改 unit 文件。 |
-| R2 | `DeploymentRecord` 缺 `id` / `created_at` | 低 | 历史查询展示时间、按 id 定位记录均需补字段；`db.rs` 查询未 select 这两列，需一并补上（`DeploymentRow` + `DeploymentRecord`）。 |
+| R2 | `DeploymentRecord` 缺 `id` / `created_at` | 低 | 历史查询展示 id/时间列需要补字段；`db.rs` 查询未 select 这两列，需一并补上（`DeploymentRow` + `DeploymentRecord`）。 |
 | R3 | T1 线上回归 | 低 | 改 `push_harbor.sh` 后需用一次真实 release 验证推送与跳过两条路径。 |
 | R4 | 工作区未提交改动（含本方案文档） | 流程风险 | 当前 master 有大量未提交改动（dogress、oneshot、新 release 脚本），且 `docs/tech-debt-plan.md` 等本方案文档也尚未提交（N9）。**建议实施前先连同方案一起提交打基线**，否则方案与代码状态脱节。 |
 
 ### 5.3 结论
 
-- **无不可逾越的硬阻塞**：T1/T2/T4 及 F1–F5 均可按 §4 顺序落地。
-- **唯一需决策的阻塞点：T3 回滚**。现有架构下回滚只能是"临时回滚"（下次 push 自动恢复最新）；若该语义可接受，则 B1 降级为文档说明，B3 用 `--deepen` 缓解后可按 P2 实施；若不可接受，T3 应暂缓并重新设计（镜像级回滚或分支冻结）。
-- **建议默认路径**：实施 T1+T4+F1+F6（第一迭代）→ T2+F2+F3+F4+F5（第二迭代）→ T3 单独评审。
+- **无阻塞问题**：T1/T2/T4 及 F1–F7 均可按 §4 顺序落地；T3 回滚已确认不实施（§3.1）。
+- **建议实施路径**：T1+T4+F1+F6（第一迭代）→ T2+F2+F3+F4+F5（第二迭代）。
 
 ---
 
 ## 6. 待决策项
 
-1. **T3 回滚语义**：接受"临时回滚"（推荐，P2）还是暂缓重新设计（P3）？
-2. **CLI 重构范围**：仅加 `history/stats` 子命令，还是同时把 `--once` 迁入 subcommand？
-3. **F6 范围**：本期是否同步把 compose/yaml 中的中间件密码改为环境变量形式（默认不做）？
+1. **CLI 重构范围**：仅加 `history/stats` 子命令，还是同时把 `--once` 迁入 subcommand？
+2. **F6 范围**：本期是否同步把 compose/yaml 中的中间件密码改为环境变量形式（默认不做）？
